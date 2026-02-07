@@ -1,0 +1,245 @@
+:root {
+  --bg-panel: #0f0f17;
+  --bg-outer: #2f2f3b;
+  --border: #d7d7db;
+  --text: #f3f3f4;
+  --accent: #ffbe3b;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: 'Courier New', monospace;
+  color: var(--text);
+  background: radial-gradient(circle at 20% 10%, #4b4b62 0%, #1c1c28 60%, #101017 100%);
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+.app {
+  min-height: 100vh;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 16px;
+}
+
+.app.battle-mode {
+  padding: 0;
+  justify-content: stretch;
+  align-items: stretch;
+}
+
+.screen {
+  width: min(1100px, 100%);
+}
+
+.panel {
+  border: 2px solid var(--border);
+  background: rgba(18, 18, 23, 0.93);
+  box-shadow: 0 0 0 2px #292938 inset;
+  padding: 16px;
+}
+
+.title-screen {
+  position: relative;
+  max-width: 900px;
+}
+
+.title-canvas {
+  width: 100%;
+  border: 2px solid var(--border);
+  display: block;
+}
+
+.title-overlay {
+  position: absolute;
+  top: 20px;
+  left: 20px;
+  width: 320px;
+  display: grid;
+  gap: 8px;
+}
+
+h1,
+h2,
+p {
+  margin: 0;
+}
+
+.subtitle {
+  color: #cfd6ff;
+  margin-bottom: 8px;
+}
+
+button {
+  border: 2px solid #e5e5e8;
+  background: #2d2d3b;
+  color: #fff;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+button:hover {
+  background: #414155;
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.settings-screen,
+.players-screen,
+.shop-screen,
+.end-screen {
+  display: grid;
+  gap: 10px;
+}
+
+.shop-screen {
+  max-height: calc(100vh - 32px);
+  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+}
+
+label {
+  display: grid;
+  gap: 4px;
+}
+
+.row {
+  display: flex;
+  gap: 10px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.player-card {
+  border: 1px solid #51516b;
+  padding: 8px;
+  display: grid;
+  gap: 6px;
+}
+
+.error {
+  color: #ff8f98;
+}
+
+.shop-grid {
+  min-height: 0;
+  overflow: auto;
+  display: grid;
+  gap: 8px;
+  padding-right: 4px;
+}
+
+.weapon-row {
+  border: 1px solid #50506b;
+  padding: 8px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.weapon-meta {
+  color: #b6bad9;
+  font-size: 12px;
+}
+
+.weapon-controls {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.battle-screen {
+  display: grid;
+  gap: 0;
+  justify-items: stretch;
+  width: 100vw;
+  height: 100vh;
+  position: relative;
+}
+
+.battle-canvas {
+  width: 100vw;
+  height: 100vh;
+  max-width: none;
+  border: 1px solid #d9d9de;
+  background: #000;
+  image-rendering: pixelated;
+}
+
+.battle-host {
+  width: 100vw;
+  height: 100vh;
+}
+
+.battle-host canvas {
+  width: 100vw;
+  height: 100vh;
+  max-width: none;
+  display: block;
+}
+
+.battle-note-overlay {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  color: #c6c9df;
+  font-size: 12px;
+  background: rgba(8, 8, 12, 0.5);
+  border: 1px solid #7b7f99;
+  padding: 2px 6px;
+  pointer-events: none;
+}
+
+.shield-popup {
+  position: absolute;
+  right: 16px;
+  top: 44px;
+  min-width: 260px;
+  border: 2px solid #d6d6de;
+  background: rgba(14, 14, 20, 0.95);
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.shield-popup-title {
+  font-weight: 700;
+}
+
+.shield-popup-items {
+  display: grid;
+  gap: 6px;
+}
+
+.toast {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  border: 2px solid #d6d6de;
+  background: #1c1c26;
+  padding: 8px 12px;
+}
+
+@media (max-width: 860px) {
+  .title-overlay {
+    position: static;
+    width: 100%;
+    margin-top: 8px;
+  }
+}
