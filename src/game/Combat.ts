@@ -24,14 +24,12 @@ export function computeExplosionDamage(input: DamageInput): DamageResult {
     return { hpLoss: 0, nextShield: input.shield, nextArmor: input.armor };
   }
 
-  const normalized = (input.blastRadius - input.dist) / input.blastRadius;
-  const scaledBase = normalized * input.weaponDamage * 2.2;
-  let blast = scaledBase + input.secondaryDamage * 1.35;
+  const splashRadius = input.blastRadius * 1.02;
+  const normalized = Math.max(0, (splashRadius - input.dist) / splashRadius);
+  let blast = normalized * input.weaponDamage + input.secondaryDamage * 0.6;
 
-  if (input.dist <= 5) {
-    blast += Math.max(12, input.weaponDamage * 1.05);
-  } else if (input.dist <= input.blastRadius * 0.18) {
-    blast += input.weaponDamage * 0.35;
+  if (input.dist <= 4) {
+    blast += input.weaponDamage * 0.7;
   }
 
   let remaining = Math.max(0, blast);
@@ -71,7 +69,7 @@ export function spawnFunkeyBomblets(
       vx: Math.cos(radians) * speed + parentVx * 0.18,
       vy: -Math.sin(radians) * speed + Math.min(0, parentVy) * 0.1,
       ownerId,
-      weaponId: 'funkey-bomb',
+      weaponId: 'funky-bomb',
       ttl: 4.4,
       splitDepth: 1,
       color: FUNKEY_COLORS[idx % FUNKEY_COLORS.length],

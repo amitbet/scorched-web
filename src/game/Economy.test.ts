@@ -4,12 +4,12 @@ import type { PlayerState } from '../types/game';
 
 const basePlayer: PlayerState = {
   config: { id: 'p1', name: 'P1', kind: 'human', aiLevel: 'easy', colorIndex: 0, enabled: true },
-  cash: 1000,
+  cash: 30000,
   armor: 100,
   shield: 0,
   fuel: 100,
   parachutes: 0,
-  inventory: { baby: 1 },
+  inventory: { missile: 999 },
   alive: true,
   score: 0,
   hp: 100,
@@ -19,14 +19,14 @@ const basePlayer: PlayerState = {
   fallDistance: 0,
   angle: 45,
   power: 500,
-  selectedWeaponId: 'baby',
+  selectedWeaponId: 'missile',
 };
 
 describe('Economy', () => {
   it('buys weapon when enough cash', () => {
-    const next = buyWeapon(basePlayer, 'missile');
+    const next = buyWeapon(basePlayer, 'baby-digger');
     expect(next.cash).toBeLessThan(basePlayer.cash);
-    expect(next.inventory.missile).toBe(5);
+    expect(next.inventory['baby-digger']).toBe(1);
   });
 
   it('sells owned weapon and increases cash', () => {

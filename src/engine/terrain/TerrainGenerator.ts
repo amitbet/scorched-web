@@ -1,4 +1,5 @@
 import type { TerrainPreset, TerrainState } from '../../types/game';
+import { smoothTerrainHeights, terrainFromHeights } from './TerrainProfile';
 
 function fractalHeight(x: number, width: number, base: number, preset: TerrainPreset): number {
   const t = x / width;
@@ -19,18 +20,14 @@ function fractalHeight(x: number, width: number, base: number, preset: TerrainPr
 
 export function generateTerrain(width: number, height: number, preset: TerrainPreset): TerrainState {
   const selected = preset === 'random' ? (['rolling', 'canyon', 'islands'] as TerrainPreset[])[Math.floor(Math.random() * 3)] : preset;
-  const heights = new Array<number>(width).fill(0);
-  const mask = new Uint8Array(width * height);
+  const rawHeights = new Array<number>(width).fill(0);
 
   for (let x = 0; x < width; x += 1) {
     const normalized = fractalHeight(x, width, 0.6, selected);
     const h = Math.max(Math.floor(height * 0.28), Math.min(Math.floor(height * 0.9), Math.floor(height * normalized)));
-    heights[x] = h;
-
-    for (let y = h; y < height; y += 1) {
-      mask[y * width + x] = 1;
-    }
+    rawHeights[x] = h;
   }
 
-  return { width, height, revision: 0, heights, mask };
+  const heights = smoothTerrainHeights(rawHeights, height);
+  return terrainFromHeights(width, height, heights);
 }

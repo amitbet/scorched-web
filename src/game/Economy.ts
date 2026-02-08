@@ -5,12 +5,12 @@ const SELL_FACTOR = 0.6;
 
 export function canBuy(player: PlayerState, weaponId: string): boolean {
   const weapon = getWeaponById(weaponId);
-  return player.cash >= weapon.packPrice;
+  return weapon.packPrice > 0 && player.cash >= weapon.packPrice;
 }
 
 export function buyWeapon(player: PlayerState, weaponId: string): PlayerState {
   const weapon = getWeaponById(weaponId);
-  if (player.cash < weapon.packPrice) {
+  if (weapon.packPrice <= 0 || player.cash < weapon.packPrice) {
     return player;
   }
 

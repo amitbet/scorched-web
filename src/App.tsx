@@ -4,24 +4,48 @@ import { SettingsScreen } from './screens/SettingsScreen';
 import { PlayersScreen } from './screens/PlayersScreen';
 import { ShopScreen } from './screens/ShopScreen';
 import { BattleScreen, type BattleInputState } from './screens/BattleScreen';
-import { DEFAULT_SETTINGS, TANK_COLORS, type GameSettings, type MatchState, type PlayerConfig, type PlayerState, type ProjectileState, type TerrainState } from './types/game';
+import { DEFAULT_SETTINGS, type GameSettings, type MatchState, type PlayerConfig, type PlayerState, type ProjectileState, type TerrainState } from './types/game';
 import { loadProfile, saveProfile } from './utils/storage';
 import { buyWeapon, sellWeapon } from './game/Economy';
 import { STARTER_WEAPON_ID, WEAPONS, getWeaponById } from './game/WeaponCatalog';
 import { FIXED_DT, spreadAngles, stepProjectile, toVelocity } from './engine/physics/Ballistics';
 import { applyRoundEnd, initMatch, nextActivePlayer, updatePlayer } from './game/MatchController';
-import { carveCrater, carveTunnel } from './engine/terrain/TerrainDeform';
+import { addDirt, carveCrater, settleTerrain } from './engine/terrain/TerrainDeform';
 import { computeAIShot } from './engine/ai/AimAI';
 import { generateTerrain } from './engine/terrain/TerrainGenerator';
-import { computeExplosionDamage, spawnFunkeyBomblets } from './game/Combat';
+import { pickRandomMtn, preloadMtnTerrains } from './engine/terrain/MtnTerrain';
+import { computeExplosionDamage } from './game/Combat';
+import { getWeaponRuntimeSpec } from './game/weapons/runtimeSpecs';
 import { SHIELD_ITEMS, activateShieldFromInventory, autoActivateShieldAtRoundStart } from './game/Shield';
 
 type Screen = 'title' | 'settings' | 'players' | 'shop' | 'battle' | 'matchEnd';
 
 interface RuntimeState {
   projectiles: ProjectileState[];
-  explosions: { x: number; y: number; radius: number; life: number; color?: string }[];
+  explosions: {
+    id: number;
+    x: number;
+    y: number;
+    radius: number;
+    life: number;
+    maxLife?: number;
+    color?: string;
+    kind?: 'burst' | 'simple' | 'fire' | 'laser' | 'sand' | 'funky' | 'nuke';
+    beamHeight?: number;
+    seed?: number;
+  }[];
   trails: { x1: number; y1: number; x2: number; y2: number; ownerId: string; life: number; color?: string }[];
+  terrainEdits: Array<{
+    mode: 'crater' | 'tunnel' | 'addDirt';
+    x: number;
+    y: number;
+    radius: number;
+    length?: number;
+    amount?: number;
+    duration: number;
+    elapsed: number;
+    appliedSteps: number;
+  }>;
 }
 
 function makeDefaultPlayers(): PlayerConfig[] {
@@ -36,7 +60,7 @@ function makeDefaultPlayers(): PlayerConfig[] {
 }
 
 function pickNextWeapon(player: PlayerState, delta: number): string {
-  const owned = WEAPONS.filter((w) => (player.inventory[w.id] ?? 0) > 0);
+  const owned = WEAPONS.filter((w) => w.projectileCount > 0 && (player.inventory[w.id] ?? 0) > 0);
   if (owned.length === 0) {
     return player.selectedWeaponId;
   }
@@ -58,41 +82,222 @@ function clamp(v: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, v));
 }
 
+function effectiveBlastRadius(weaponId: string, baseRadius: number): number {
+  if (weaponId === 'baby-nuke' || weaponId === 'nuke' || weaponId === 'funky-nuke') {
+    return Math.round(baseRadius * 1.12);
+  }
+  return baseRadius;
+}
+
 function normalizeSettings(input: GameSettings): GameSettings {
   return {
     ...input,
-    gravity: clamp(Number.isFinite(input.gravity) ? input.gravity : DEFAULT_SETTINGS.gravity, 180, 480),
+    gravity: clamp(Number.isFinite(input.gravity) ? input.gravity : DEFAULT_SETTINGS.gravity, 160, 420),
     roundsToWin: clamp(Number.isFinite(input.roundsToWin) ? input.roundsToWin : DEFAULT_SETTINGS.roundsToWin, 1, 9),
-    cashStart: clamp(Number.isFinite(input.cashStart) ? input.cashStart : DEFAULT_SETTINGS.cashStart, 1000, 100000),
+    cashStart: clamp(Number.isFinite(input.cashStart) ? input.cashStart : DEFAULT_SETTINGS.cashStart, 0, 500000),
     powerAdjustHz: clamp(Number.isFinite(input.powerAdjustHz) ? input.powerAdjustHz : DEFAULT_SETTINGS.powerAdjustHz, 2, 40),
   };
 }
 
 function maxPowerForHp(hp: number): number {
-  return clamp(Math.round(260 + hp * 7.4), 260, 1000);
+  return clamp(Math.round(200 + hp * 8), 200, 1000);
 }
 
-function enqueueTankDeathFx(runtime: RuntimeState, player: PlayerState): void {
-  const color = TANK_COLORS[player.config.colorIndex % TANK_COLORS.length];
-  for (let i = 0; i < 4; i += 1) {
-    runtime.explosions.push({
-      x: player.x + (i - 1.5) * 4,
-      y: player.y - 2 - i * 1.8,
-      radius: 16 + i * 4,
-      life: 0.45 + i * 0.08,
-      color,
+function pushFx(
+  runtime: RuntimeState,
+  nextFxId: () => number,
+  fx: Omit<RuntimeState['explosions'][number], 'id'>,
+): void {
+  runtime.explosions.push({ id: nextFxId(), ...fx });
+}
+
+function enqueueTankDeathFx(runtime: RuntimeState, player: PlayerState, nextFxId: () => number): void {
+  const deathStyle = Math.floor(Math.random() * 7);
+
+  if (deathStyle === 0) {
+    pushFx(runtime, nextFxId, {
+      x: player.x,
+      y: player.y + 8,
+      radius: 24,
+      life: 1.05,
+      maxLife: 1.05,
+      kind: 'fire',
+    });
+    return;
+  }
+
+  if (deathStyle === 1) {
+    pushFx(runtime, nextFxId, {
+      x: player.x,
+      y: player.y - 2,
+      radius: 12,
+      life: 0.34,
+      maxLife: 0.34,
+      color: '#ff9b2f',
+      kind: 'simple',
+      seed: Math.floor(Math.random() * 1000000),
+    });
+    return;
+  }
+
+  if (deathStyle === 2) {
+    pushFx(runtime, nextFxId, {
+      x: player.x,
+      y: player.y - 2,
+      radius: 60,
+      life: 0.72,
+      maxLife: 0.72,
+      color: '#ff8c22',
+      kind: 'simple',
+      seed: Math.floor(Math.random() * 1000000),
+    });
+    return;
+  }
+
+  if (deathStyle === 3) {
+    pushFx(runtime, nextFxId, {
+      x: player.x,
+      y: player.y - 2,
+      radius: 100,
+      life: 1.04,
+      maxLife: 1.04,
+      color: '#ff7f1a',
+      kind: 'simple',
+      seed: Math.floor(Math.random() * 1000000),
+    });
+    return;
+  }
+
+  if (deathStyle === 4) {
+    pushFx(runtime, nextFxId, {
+      x: player.x,
+      y: player.y + 4,
+      radius: 44,
+      life: 0.86,
+      maxLife: 0.86,
+      kind: 'sand',
+    });
+    return;
+  }
+
+  if (deathStyle === 5) {
+    pushFx(runtime, nextFxId, {
+      x: player.x,
+      y: player.y + 8,
+      radius: 12,
+      beamHeight: 200,
+      life: 0.95,
+      maxLife: 0.95,
+      kind: 'laser',
+    });
+    return;
+  }
+
+  pushFx(runtime, nextFxId, {
+    x: player.x,
+    y: player.y - 2,
+    radius: 34,
+    life: 0.8,
+    maxLife: 0.8,
+    kind: 'funky',
+  });
+}
+
+function emitWeaponImpactFx(
+  runtime: RuntimeState,
+  nextFxId: () => number,
+  weaponId: string,
+  x: number,
+  y: number,
+  radius: number,
+  color?: string,
+): void {
+  if (weaponId === 'sand-bomb') {
+    pushFx(runtime, nextFxId, {
+      x,
+      y,
+      radius: Math.max(40, radius),
+      life: 0.95,
+      maxLife: 0.95,
+      kind: 'sand',
+      color: '#d8c386',
+    });
+    return;
+  }
+
+  if (weaponId === 'napalm' || weaponId === 'hot-napalm') {
+    const blobs = weaponId === 'hot-napalm' ? 10 : 7;
+    for (let i = 0; i < blobs; i += 1) {
+      const a = (Math.PI * 2 * i) / blobs;
+      const dist = 6 + i * (weaponId === 'hot-napalm' ? 2.4 : 1.8);
+      pushFx(runtime, nextFxId, {
+        x: x + Math.cos(a) * dist,
+        y: y + Math.sin(a) * (dist * 0.45),
+        radius: weaponId === 'hot-napalm' ? 18 : 14,
+        life: weaponId === 'hot-napalm' ? 1.35 : 1.05,
+        maxLife: weaponId === 'hot-napalm' ? 1.35 : 1.05,
+        kind: 'fire',
+      });
+    }
+    return;
+  }
+
+  const simple = weaponId === 'missile';
+  const nukeLike = weaponId === 'baby-nuke' || weaponId === 'nuke';
+  pushFx(runtime, nextFxId, {
+    x,
+    y,
+    radius,
+    life: weaponId === 'nuke' ? 2.2 : weaponId === 'baby-nuke' ? 1.7 : 0.45,
+    maxLife: weaponId === 'nuke' ? 2.2 : weaponId === 'baby-nuke' ? 1.7 : 0.45,
+    color,
+    kind: simple ? 'simple' : nukeLike ? 'nuke' : 'burst',
+    seed: simple || nukeLike ? Math.floor(Math.random() * 1000000) : undefined,
+  });
+}
+
+function spawnMirvChildren(parent: ProjectileState, count: number): ProjectileState[] {
+  const offset = 5;
+  let speed = parent.vx - (offset * count) / 2;
+  const out: ProjectileState[] = [];
+  for (let i = 0; i < count; i += 1) {
+    out.push({
+      x: parent.x,
+      y: parent.y,
+      vx: speed,
+      vy: 10,
+      ownerId: parent.ownerId,
+      weaponId: parent.weaponId,
+      ttl: 5.2,
+      projectileType: 'mirv-child',
+      splitDepth: (parent.splitDepth ?? 0) + 1,
+    });
+    speed += offset;
+  }
+  return out;
+}
+
+function spawnFunkyChildren(parent: ProjectileState, count: number): ProjectileState[] {
+  const colors = ['#ff0000', '#ff9f1a', '#ffe64d', '#00ff5a', '#00b2ff', '#354dff'];
+  const out: ProjectileState[] = [];
+  for (let i = 0; i < count; i += 1) {
+    const angle = 20 + Math.random() * 140;
+    const radians = (angle * Math.PI) / 180;
+    const speed = 95 + Math.random() * 170;
+    out.push({
+      x: parent.x + Math.cos(radians) * 5,
+      y: parent.y - Math.sin(radians) * 5,
+      vx: Math.cos(radians) * speed,
+      vy: -Math.sin(radians) * speed,
+      ownerId: parent.ownerId,
+      weaponId: parent.weaponId,
+      ttl: 3.6,
+      splitDepth: (parent.splitDepth ?? 0) + 1,
+      projectileType: 'funky-child',
+      color: colors[i % colors.length],
     });
   }
-  for (let i = 0; i < 12; i += 1) {
-    const a = (Math.PI * 2 * i) / 12;
-    runtime.explosions.push({
-      x: player.x + Math.cos(a) * 10,
-      y: player.y - 2 + Math.sin(a) * 5,
-      radius: 4 + (i % 3),
-      life: 0.28 + (i % 4) * 0.06,
-      color: i % 2 === 0 ? '#ffb547' : '#ff3e2a',
-    });
-  }
+  return out;
 }
 
 export default function App(): JSX.Element {
@@ -106,10 +311,11 @@ export default function App(): JSX.Element {
   const [winnerName, setWinnerName] = useState('');
   const [shieldMenuOpen, setShieldMenuOpen] = useState(false);
 
-  const runtimeRef = useRef<RuntimeState>({ projectiles: [], explosions: [], trails: [] });
+  const runtimeRef = useRef<RuntimeState>({ projectiles: [], explosions: [], trails: [], terrainEdits: [] });
   const aiFireTimeout = useRef<number | null>(null);
   const matchRef = useRef<MatchState | null>(null);
   const terrainRef = useRef<TerrainState | null>(null);
+  const nextFxIdRef = useRef(1);
   const simulationAccumulatorRef = useRef(0);
   const uiSyncAccumulatorRef = useRef(0);
   const powerTickAccumulatorRef = useRef(0);
@@ -125,6 +331,12 @@ export default function App(): JSX.Element {
   }, [terrain]);
 
   useEffect(() => {
+    void preloadMtnTerrains().catch(() => {
+      // Fallback to procedural terrain if MTN assets fail to load.
+    });
+  }, []);
+
+  useEffect(() => {
     if (screen !== 'battle' || !match || match.phase !== 'aim') {
       setShieldMenuOpen(false);
       return;
@@ -134,6 +346,63 @@ export default function App(): JSX.Element {
       setShieldMenuOpen(false);
     }
   }, [match, screen]);
+
+  useEffect(() => {
+    if (screen !== 'shop' || !match) {
+      return;
+    }
+    if (match.players.length === 0) {
+      return;
+    }
+    setShopIndex((idx) => clamp(idx, 0, match.players.length - 1));
+  }, [screen, match]);
+
+  const makeTerrainForRound = useCallback(async (
+    width: number,
+    height: number,
+    preset: GameSettings['terrainPreset'],
+    _playerCount: number,
+  ): Promise<{ terrain: TerrainState; source: string }> => {
+    if (preset === 'mtn') {
+      try {
+        const picked = await pickRandomMtn(width, height);
+        return {
+          terrain: picked.terrain,
+          source: `MTN ${picked.sourceName}`,
+        };
+      } catch (error) {
+        console.warn('MTN terrain load failed, using procedural fallback.', error);
+        return {
+          terrain: generateTerrain(width, height, 'rolling'),
+          source: 'Procedural fallback',
+        };
+      }
+    }
+    if (preset === 'random') {
+      const proceduralChoices: Array<Exclude<GameSettings['terrainPreset'], 'random' | 'mtn'>> = ['rolling', 'canyon', 'islands'];
+      const useMtn = Math.random() < 0.5;
+      if (useMtn) {
+        try {
+          const picked = await pickRandomMtn(width, height);
+          return {
+            terrain: picked.terrain,
+            source: `MTN ${picked.sourceName}`,
+          };
+        } catch {
+          // Fall through to procedural random selection below.
+        }
+      }
+      const chosen = proceduralChoices[Math.floor(Math.random() * proceduralChoices.length)] ?? 'rolling';
+      return {
+        terrain: generateTerrain(width, height, chosen),
+        source: `Procedural ${chosen}`,
+      };
+    }
+    return {
+      terrain: generateTerrain(width, height, preset),
+      source: `Procedural ${preset}`,
+    };
+  }, []);
 
   const fireWeapon = useCallback((sourceMatch: MatchState, shooter: PlayerState) => {
     const weapon = getWeaponById(shooter.selectedWeaponId);
@@ -159,15 +428,15 @@ export default function App(): JSX.Element {
       const batteryHeal = weapon.id === 'battery' ? 32 : 0;
       const shieldBoost =
         weapon.id === 'shield' ? 35 :
-        weapon.id === 'force-shield' ? 55 :
+        weapon.id === 'medium-shield' ? 55 :
         weapon.id === 'heavy-shield' ? 85 : 0;
-      const fuelBoost = weapon.id === 'fuel-tank' ? 80 : 0;
+      const fuelBoost = weapon.id === 'fuel' ? 100 : 0;
       const parachuteBoost = weapon.id === 'parachute' ? 1 : 0;
       const updated = {
         ...armedShooter,
         hp: clamp(armedShooter.hp + batteryHeal, 0, 100),
-        shield: clamp(armedShooter.shield + shieldBoost, 0, 160),
-        fuel: clamp(armedShooter.fuel + fuelBoost, 0, 999),
+        shield: clamp(armedShooter.shield + shieldBoost * 8, 0, 1000),
+        fuel: clamp(armedShooter.fuel + fuelBoost, 0, 1000),
         parachutes: clamp(armedShooter.parachutes + parachuteBoost, 0, 9),
       };
       const nextMatch = nextActivePlayer(updatePlayer(sourceMatch, updated));
@@ -178,6 +447,7 @@ export default function App(): JSX.Element {
     }
 
     const angles = spreadAngles(armedShooter.angle, weapon.projectileCount, weapon.spreadDeg);
+    const weaponSpec = getWeaponRuntimeSpec(weapon.id);
     for (const angle of angles) {
       const { vx, vy } = toVelocity(angle, armedShooter.power);
       runtimeRef.current.projectiles.push({
@@ -189,6 +459,7 @@ export default function App(): JSX.Element {
         weaponId: weapon.id,
         ttl: 9,
         splitDepth: 0,
+        projectileType: weaponSpec.launchProjectileType,
       });
     }
 
@@ -201,7 +472,7 @@ export default function App(): JSX.Element {
   const applyHeldAimInput = useCallback((
     currentMatch: MatchState,
     currentTerrain: TerrainState,
-    input: Pick<BattleInputState, 'moveLeft' | 'moveRight' | 'left' | 'right' | 'up' | 'down' | 'fastUp' | 'fastDown' | 'powerSet'>,
+    input: Pick<BattleInputState, 'moveLeft' | 'moveRight' | 'alt' | 'left' | 'right' | 'up' | 'down' | 'fastUp' | 'fastDown' | 'powerSet'>,
     deltaSeconds: number,
   ): MatchState => {
     if (currentMatch.phase !== 'aim') {
@@ -239,18 +510,19 @@ export default function App(): JSX.Element {
     }
 
     const angleDirection = (input.left ? 1 : 0) - (input.right ? 1 : 0);
+    const angleStep = input.alt && angleDirection !== 0 ? 10 : 1;
     let updatedAngle = active.angle;
     if (angleDirection !== 0) {
       angleTickAccumulatorRef.current += deltaSeconds * currentMatch.settings.powerAdjustHz;
       while (angleTickAccumulatorRef.current >= 1) {
-        updatedAngle = clamp(updatedAngle + angleDirection, 2, 178);
+        updatedAngle = clamp(updatedAngle + angleDirection * angleStep, 2, 178);
         angleTickAccumulatorRef.current -= 1;
       }
     } else {
       angleTickAccumulatorRef.current = 0;
     }
     if (typeof input.powerSet === 'number') {
-      const setPower = clamp(input.powerSet, 120, active.maxPower);
+      const setPower = clamp(input.powerSet, 200, active.maxPower);
       if (
         setPower === active.power &&
         updatedAngle === active.angle &&
@@ -265,20 +537,23 @@ export default function App(): JSX.Element {
         x: updatedX,
         y: updatedY,
         fuel: updatedFuel,
+        inventory: { ...active.inventory, fuel: Math.floor(updatedFuel) },
         fallDistance: 0,
         angle: updatedAngle,
         power: setPower,
       });
     }
 
-    const fastDirection = (input.fastUp ? 1 : 0) - (input.fastDown ? 1 : 0);
-    const powerDirection = fastDirection !== 0 ? fastDirection : (input.up ? 1 : 0) - (input.down ? 1 : 0);
-    const powerStep = fastDirection !== 0 ? 15 : 1;
+    const pageFastDirection = (input.fastUp ? 1 : 0) - (input.fastDown ? 1 : 0);
+    const arrowDirection = (input.up ? 1 : 0) - (input.down ? 1 : 0);
+    const altFastDirection = input.alt ? arrowDirection : 0;
+    const powerDirection = pageFastDirection !== 0 ? pageFastDirection : (altFastDirection !== 0 ? altFastDirection : arrowDirection);
+    const powerStep = pageFastDirection !== 0 || altFastDirection !== 0 ? 10 : 1;
     let updatedPower = active.power;
     if (powerDirection !== 0) {
       powerTickAccumulatorRef.current += deltaSeconds * currentMatch.settings.powerAdjustHz;
       while (powerTickAccumulatorRef.current >= 1) {
-        updatedPower = clamp(updatedPower + powerDirection * powerStep, 120, active.maxPower);
+        updatedPower = clamp(updatedPower + powerDirection * powerStep, 200, active.maxPower);
         powerTickAccumulatorRef.current -= 1;
       }
     } else {
@@ -300,6 +575,7 @@ export default function App(): JSX.Element {
       x: updatedX,
       y: updatedY,
       fuel: updatedFuel,
+      inventory: { ...active.inventory, fuel: Math.floor(updatedFuel) },
       fallDistance: 0,
       angle: updatedAngle,
       power: updatedPower,
@@ -311,10 +587,260 @@ export default function App(): JSX.Element {
     const runtime = runtimeRef.current;
     let nextTerrain = currentTerrain;
     let nextMatch = currentMatch;
+    let terrainNeedsSettle = false;
+
+    const enqueueTerrainEdit = (
+      mode: 'crater' | 'tunnel' | 'addDirt',
+      x: number,
+      y: number,
+      radius: number,
+      duration: number,
+      length?: number,
+      amount?: number,
+    ): void => {
+      runtime.terrainEdits.push({
+        mode,
+        x,
+        y,
+        radius,
+        length,
+        amount,
+        duration,
+        elapsed: 0,
+        appliedSteps: 0,
+      });
+    };
+
+    if (runtime.terrainEdits.length > 0) {
+      const nextEdits: RuntimeState['terrainEdits'] = [];
+      for (const edit of runtime.terrainEdits) {
+        const elapsed = edit.elapsed + FIXED_DT;
+        const duration = Math.max(0.05, edit.duration);
+        const progress = clamp(elapsed / duration, 0, 1);
+        const totalSteps = Math.max(1, Math.round((edit.length ?? edit.radius) * 1.6));
+        const targetSteps = Math.min(totalSteps, Math.max(edit.appliedSteps, Math.floor(progress * totalSteps)));
+        let appliedSteps = edit.appliedSteps;
+
+        while (appliedSteps < targetSteps) {
+          const stepN = appliedSteps + 1;
+          if (edit.mode === 'crater') {
+            const r = Math.max(1, (edit.radius * stepN) / totalSteps);
+            nextTerrain = carveCrater(nextTerrain, edit.x, edit.y, r, false);
+            terrainNeedsSettle = true;
+          } else if (edit.mode === 'addDirt') {
+            const amt = Math.max(1, Math.round((edit.amount ?? 1) / totalSteps));
+            nextTerrain = addDirt(nextTerrain, edit.x, edit.y, edit.radius, amt, false);
+            terrainNeedsSettle = true;
+          } else {
+            const len = Math.max(1, edit.length ?? 1);
+            const seg = Math.floor((len * stepN) / totalSteps);
+            const prevSeg = Math.floor((len * appliedSteps) / totalSteps);
+            for (let i = prevSeg; i < seg; i += 1) {
+              nextTerrain = carveCrater(nextTerrain, edit.x, edit.y + i * 2, edit.radius, false);
+              terrainNeedsSettle = true;
+            }
+          }
+          appliedSteps += 1;
+        }
+
+        if (progress < 1) {
+          nextEdits.push({ ...edit, elapsed, appliedSteps });
+        }
+      }
+      runtime.terrainEdits = nextEdits;
+      if (runtime.terrainEdits.length === 0 && terrainNeedsSettle) {
+        nextTerrain = settleTerrain(nextTerrain);
+      }
+
+      runtime.explosions = runtime.explosions
+        .map((e) => ({ ...e, maxLife: e.maxLife ?? e.life, life: e.life - FIXED_DT }))
+        .filter((e) => e.life > 0);
+      runtime.trails = runtime.trails
+        .map((t) => ({ ...t, life: t.life - FIXED_DT * 1.6 }))
+        .filter((t) => t.life > 0)
+        .slice(-2400);
+
+      matchRef.current = nextMatch;
+      terrainRef.current = nextTerrain;
+      return;
+    }
 
     const survivors: ProjectileState[] = [];
     const spawnedProjectiles: ProjectileState[] = [];
+
+    const applyDamageAt = (
+      impactX: number,
+      impactY: number,
+      blastRadius: number,
+      weaponDamage: number,
+      splitDepth = 0,
+    ): void => {
+      nextMatch = {
+        ...nextMatch,
+        players: nextMatch.players.map((player) => {
+          if (!player.alive) {
+            return player;
+          }
+          const dist = Math.hypot(player.x - impactX, player.y - impactY);
+          const secondary = runtime.explosions.slice(-12).reduce((acc, e) => {
+            const d = Math.hypot(player.x - e.x, player.y - e.y);
+            if (d > e.radius) {
+              return acc;
+            }
+            return acc + ((e.radius - d) / Math.max(1, e.radius)) * 8;
+          }, 0);
+          const damage = computeExplosionDamage({
+            dist,
+            blastRadius,
+            weaponDamage: splitDepth > 0 ? weaponDamage * 0.8 : weaponDamage,
+            secondaryDamage: secondary,
+            shield: player.shield,
+            armor: player.armor,
+          });
+          if (damage.hpLoss <= 0) {
+            return player;
+          }
+
+          const nextHp = clamp(player.hp - damage.hpLoss, 0, 100);
+          if (player.alive && nextHp <= 0) {
+            enqueueTankDeathFx(runtime, player, () => nextFxIdRef.current++);
+          }
+          return {
+            ...player,
+            shield: damage.nextShield,
+            armor: damage.nextArmor,
+            hp: nextHp,
+            maxPower: maxPowerForHp(nextHp),
+            power: clamp(player.power, 200, maxPowerForHp(nextHp)),
+            alive: nextHp > 0,
+          };
+        }),
+      };
+    };
+
     for (const projectile of runtime.projectiles) {
+      if (projectile.projectileType === 'delayed-blast') {
+        const nextTtl = projectile.ttl - FIXED_DT;
+        if (nextTtl <= 0) {
+          const blastRadius = projectile.effectRadius ?? 35;
+          const blastDamage = (projectile.effectDamage ?? 40) * 10;
+          emitWeaponImpactFx(runtime, () => nextFxIdRef.current++, projectile.weaponId, projectile.x, projectile.y, blastRadius, projectile.color);
+          enqueueTerrainEdit('crater', projectile.x, projectile.y, blastRadius, 0.35);
+          applyDamageAt(projectile.x, projectile.y, blastRadius, blastDamage, projectile.splitDepth ?? 0);
+        } else {
+          survivors.push({ ...projectile, ttl: nextTtl });
+        }
+        continue;
+      }
+
+      if (projectile.projectileType === 'napalm-burn') {
+        const nextTtl = projectile.ttl - FIXED_DT;
+        let timer = (projectile.timer ?? 0) + FIXED_DT;
+        while (timer >= 0.18) {
+          applyDamageAt(
+            projectile.x,
+            projectile.y,
+            projectile.effectRadius ?? 14,
+            (projectile.effectDamage ?? 7) * 10,
+            projectile.splitDepth ?? 0,
+          );
+          timer -= 0.18;
+        }
+        if (Math.random() > 0.3) {
+          pushFx(runtime, () => nextFxIdRef.current++, {
+            x: projectile.x + (Math.random() * 2 - 1) * 4,
+            y: projectile.y - Math.random() * 6,
+            radius: Math.max(7, (projectile.effectRadius ?? 14) * 0.55),
+            life: 0.16,
+            maxLife: 0.16,
+            kind: 'fire',
+          });
+        }
+        if (nextTtl > 0) {
+          survivors.push({ ...projectile, ttl: nextTtl, timer });
+        }
+        continue;
+      }
+
+      if (projectile.projectileType === 'digger') {
+        let dx = 0;
+        let dy = 0;
+        let x = projectile.x;
+        let y = projectile.y;
+        for (let i = 0; i < 6; i += 1) {
+          const r = Math.random();
+          if (r < 0.46) dy = 1;
+          else if (r < 0.62) dy = -1;
+          else dx = r < 0.81 ? -1 : 1;
+          x = clamp(x + dx, 1, nextTerrain.width - 2);
+          y = clamp(y + dy, 1, nextTerrain.height - 2);
+          enqueueTerrainEdit('crater', x, y, 1.5, 0.05);
+          runtime.trails.push({
+            x1: x,
+            y1: y,
+            x2: x + (Math.random() * 2 - 1),
+            y2: y + (Math.random() * 2 - 1),
+            ownerId: projectile.ownerId,
+            life: 0.22,
+            color: '#d8c38d',
+          });
+          dx = 0;
+          dy = 0;
+        }
+        const nextTtl = projectile.ttl - FIXED_DT;
+        if (nextTtl > 0) {
+          survivors.push({ ...projectile, x, y, ttl: nextTtl });
+        }
+        continue;
+      }
+
+      if (projectile.projectileType === 'roller') {
+        let dir = projectile.direction ?? (projectile.vx >= 0 ? 1 : -1);
+        let bounceCount = projectile.state ?? 0;
+        let x = clamp(Math.round(projectile.x + dir), 2, nextTerrain.width - 3);
+        let y = nextTerrain.heights[x] - 3;
+        const probeX = clamp(Math.round(x + dir), 2, nextTerrain.width - 3);
+        const probeY = nextTerrain.heights[probeX] - 3;
+        let stable = Math.abs(probeY - y) <= 5;
+        if (!stable) {
+          if (bounceCount < 2) {
+            dir *= -1;
+            bounceCount += 1;
+            const retryX = clamp(Math.round(x + dir), 2, nextTerrain.width - 3);
+            const retryY = nextTerrain.heights[retryX] - 3;
+            stable = Math.abs(retryY - y) <= 5;
+          }
+        }
+        const hitPlayer = nextMatch.players.find(
+          (player) =>
+            player.alive &&
+            player.config.id !== projectile.ownerId &&
+            Math.abs(player.x - x) < 7 &&
+            Math.abs(player.y - y) < 6,
+        );
+
+        runtime.trails.push({
+          x1: projectile.x,
+          y1: projectile.y,
+          x2: x,
+          y2: y,
+          ownerId: projectile.ownerId,
+          life: 0.35,
+          color: '#eeeeee',
+        });
+
+        const nextTtl = projectile.ttl - FIXED_DT;
+        if (!stable || hitPlayer || nextTtl <= 0) {
+          const weapon = getWeaponById(projectile.weaponId);
+          emitWeaponImpactFx(runtime, () => nextFxIdRef.current++, weapon.id, x, y, weapon.blastRadius, projectile.color);
+          enqueueTerrainEdit('crater', x, y, weapon.blastRadius, 0.35);
+          applyDamageAt(x, y, weapon.blastRadius, weapon.damage * 10, projectile.splitDepth ?? 0);
+        } else {
+          survivors.push({ ...projectile, x, y, direction: dir, state: bounceCount, ttl: nextTtl });
+        }
+        continue;
+      }
+
       let p = projectile;
       let collided = false;
       const subStepCount = 4;
@@ -333,6 +859,13 @@ export default function App(): JSX.Element {
           life: 0.85,
           color: p.color,
         });
+
+        if (p.projectileType === 'mirv-carrier' && before.vy < 0 && p.vy >= 0) {
+          const spec = getWeaponRuntimeSpec(p.weaponId);
+          spawnedProjectiles.push(...spawnMirvChildren(p, spec.mirvChildCount ?? 5));
+          collided = true;
+          break;
+        }
 
         if (p.x < 0 || p.x >= currentTerrain.width || p.y < 0 || p.y >= currentTerrain.height) {
           collided = true;
@@ -355,74 +888,134 @@ export default function App(): JSX.Element {
         const impactX = clamp(p.x, 0, currentTerrain.width - 1);
         const impactY = clamp(p.y, 0, currentTerrain.height - 1);
 
-        if (weapon.id === 'funkey-bomb' && (p.splitDepth ?? 0) === 0) {
-          runtime.explosions.push({ x: impactX, y: impactY, radius: 9, life: 0.25, color: '#ff8d3f' });
-          nextTerrain = carveCrater(nextTerrain, impactX, impactY, 10);
-          spawnedProjectiles.push(...spawnFunkeyBomblets(impactX, impactY, p.ownerId, p.vx, p.vy));
+        const weaponSpec = getWeaponRuntimeSpec(weapon.id);
+
+        if (weaponSpec.impactMode === 'mirv' && p.projectileType === 'mirv-carrier') {
+          spawnedProjectiles.push(...spawnMirvChildren({ ...p, x: impactX, y: impactY }, weaponSpec.mirvChildCount ?? 5));
           collided = true;
           break;
         }
 
-        if (weapon.terrainEffect === 'tunnel') {
-          nextTerrain = carveTunnel(nextTerrain, impactX, impactY, 9, Math.max(3, weapon.blastRadius * 0.2));
-        } else if (weapon.terrainEffect === 'crater') {
-          nextTerrain = carveCrater(nextTerrain, impactX, impactY, weapon.blastRadius);
+        if (weaponSpec.impactMode === 'roller') {
+          spawnedProjectiles.push({
+            x: impactX,
+            y: impactY,
+            vx: p.vx,
+            vy: 0,
+            ownerId: p.ownerId,
+            weaponId: weapon.id,
+            ttl: weaponSpec.rollerTtl ?? 3,
+            splitDepth: p.splitDepth,
+            projectileType: 'roller',
+            direction: p.vx < 0 ? -1 : 1,
+            state: 0,
+          });
+          pushFx(runtime, () => nextFxIdRef.current++, {
+            x: impactX,
+            y: impactY,
+            radius: 7,
+            life: 0.14,
+            maxLife: 0.14,
+            kind: 'burst',
+            color: '#d9d9d9',
+          });
+          collided = true;
+          break;
         }
 
-        runtime.explosions.push({ x: impactX, y: impactY, radius: weapon.blastRadius, life: 0.3, color: p.color });
-
-        if ((weapon.special === 'cluster' || weapon.special === 'napalm') && !(weapon.id === 'funkey-bomb' && (p.splitDepth ?? 0) > 0)) {
-          const extra = weapon.special === 'cluster' ? 5 : 7;
-          for (let i = 0; i < extra; i += 1) {
-            const a = (Math.PI * 2 * i) / extra;
-            const sx = impactX + Math.cos(a) * (8 + i * 2);
-            const sy = impactY + Math.sin(a) * (6 + i * 1.5);
-            runtime.explosions.push({ x: sx, y: sy, radius: Math.max(8, weapon.blastRadius * 0.42), life: 0.26 });
-            nextTerrain = carveCrater(nextTerrain, sx, sy, Math.max(8, weapon.blastRadius * 0.42));
-          }
-        }
-
-        nextMatch = {
-          ...nextMatch,
-          players: nextMatch.players.map((player) => {
-            if (!player.alive) {
-              return player;
-            }
-            const dist = Math.hypot(player.x - impactX, player.y - impactY);
-            const secondary = runtime.explosions.slice(-8).reduce((acc, e) => {
-              const d = Math.hypot(player.x - e.x, player.y - e.y);
-              if (d > e.radius) {
-                return acc;
-              }
-              return acc + ((e.radius - d) / e.radius) * 10;
-            }, 0);
-            const damage = computeExplosionDamage({
-              dist,
-              blastRadius: weapon.blastRadius,
-              weaponDamage: (p.splitDepth ?? 0) > 0 ? weapon.damage * 0.8 : weapon.damage,
-              secondaryDamage: secondary,
-              shield: player.shield,
-              armor: player.armor,
+        if (weaponSpec.impactMode === 'digger') {
+          const duration = weaponSpec.diggerDuration ?? 2;
+          for (let i = 0; i < 10; i += 1) {
+            spawnedProjectiles.push({
+              x: impactX,
+              y: impactY,
+              vx: 0,
+              vy: 0,
+              ownerId: p.ownerId,
+              weaponId: weapon.id,
+              ttl: duration,
+              projectileType: 'digger',
+              seed: i,
             });
-            if (damage.hpLoss <= 0) {
-              return player;
-            }
+          }
+          pushFx(runtime, () => nextFxIdRef.current++, {
+            x: impactX,
+            y: impactY,
+            radius: 10,
+            life: 0.2,
+            maxLife: 0.2,
+            kind: 'sand',
+            color: '#cfba88',
+          });
+          collided = true;
+          break;
+        }
 
-            const nextHp = clamp(player.hp - damage.hpLoss, 0, 100);
-            if (player.alive && nextHp <= 0) {
-              enqueueTankDeathFx(runtime, player);
-            }
-            return {
-              ...player,
-              shield: damage.nextShield,
-              armor: damage.nextArmor,
-              hp: nextHp,
-              maxPower: maxPowerForHp(nextHp),
-              power: clamp(player.power, 120, maxPowerForHp(nextHp)),
-              alive: nextHp > 0,
-            };
-          }),
-        };
+        if (weaponSpec.impactMode === 'funky' && (p.splitDepth ?? 0) === 0) {
+          const count = weaponSpec.funkyChildCount ?? 6;
+          spawnedProjectiles.push(...spawnFunkyChildren({ ...p, x: impactX, y: impactY }, count));
+          spawnedProjectiles.push({
+            x: impactX,
+            y: impactY,
+            vx: 0,
+            vy: 0,
+            ownerId: p.ownerId,
+            weaponId: weapon.id,
+            ttl: 0.85,
+            projectileType: 'delayed-blast',
+            effectRadius: weapon.blastRadius,
+            effectDamage: weapon.damage,
+          });
+          emitWeaponImpactFx(runtime, () => nextFxIdRef.current++, weapon.id, impactX, impactY, 12, '#ff8d3f');
+          enqueueTerrainEdit('crater', impactX, impactY, 10, 0.2);
+          collided = true;
+          break;
+        }
+
+        if (weaponSpec.impactMode === 'sand') {
+          enqueueTerrainEdit('addDirt', impactX, impactY, 46, 0.55, undefined, 22);
+          emitWeaponImpactFx(runtime, () => nextFxIdRef.current++, weapon.id, impactX, impactY, 45, '#d8c386');
+          collided = true;
+          break;
+        }
+
+        if (weaponSpec.impactMode === 'napalm') {
+          const drops = weaponSpec.napalmDrops ?? 12;
+          for (let i = 0; i < drops; i += 1) {
+            const a = (Math.PI * 2 * i) / drops;
+            const dx = Math.cos(a) * (8 + i * 1.1);
+            const tx = clamp(Math.round(impactX + dx), 2, nextTerrain.width - 3);
+            const ty = nextTerrain.heights[tx] - 3;
+            spawnedProjectiles.push({
+              x: tx,
+              y: ty,
+              vx: 0,
+              vy: 0,
+              ownerId: p.ownerId,
+              weaponId: weapon.id,
+              ttl: weaponSpec.napalmTtl ?? 2.8,
+              projectileType: 'napalm-burn',
+              effectRadius: weaponSpec.napalmRadius ?? 14,
+              effectDamage: weaponSpec.napalmDamage ?? 7,
+            });
+          }
+          emitWeaponImpactFx(runtime, () => nextFxIdRef.current++, weapon.id, impactX, impactY, weapon.blastRadius, '#ffc933');
+          applyDamageAt(impactX, impactY, Math.max(12, weapon.blastRadius * 0.55), weapon.damage * 6, p.splitDepth ?? 0);
+          collided = true;
+          break;
+        }
+
+        const blastRadius = p.projectileType === 'funky-child' ? 30 : effectiveBlastRadius(weapon.id, weapon.blastRadius);
+        const blastDamage = p.projectileType === 'funky-child' ? 260 : weapon.damage * 10;
+
+        if (weapon.terrainEffect === 'tunnel') {
+          enqueueTerrainEdit('tunnel', impactX, impactY, Math.max(3, blastRadius * 0.2), 0.55, 9);
+        } else if (weapon.terrainEffect === 'crater') {
+          enqueueTerrainEdit('crater', impactX, impactY, blastRadius, 0.35);
+        }
+        emitWeaponImpactFx(runtime, () => nextFxIdRef.current++, weapon.id, impactX, impactY, blastRadius, p.color);
+        applyDamageAt(impactX, impactY, blastRadius, blastDamage, p.splitDepth ?? 0);
+
         collided = true;
         break;
       }
@@ -433,13 +1026,22 @@ export default function App(): JSX.Element {
     }
 
     runtime.projectiles = [...survivors, ...spawnedProjectiles];
+    if (terrainNeedsSettle && runtime.projectiles.length === 0 && runtime.terrainEdits.length === 0) {
+      nextTerrain = settleTerrain(nextTerrain);
+    }
     runtime.explosions = runtime.explosions
-      .map((e) => ({ ...e, life: e.life - FIXED_DT }))
+      .map((e) => ({ ...e, maxLife: e.maxLife ?? e.life, life: e.life - FIXED_DT }))
       .filter((e) => e.life > 0);
     runtime.trails = runtime.trails
       .map((t) => ({ ...t, life: t.life - FIXED_DT * 1.6 }))
       .filter((t) => t.life > 0)
       .slice(-2400);
+
+    if (runtime.terrainEdits.length > 0) {
+      matchRef.current = nextMatch;
+      terrainRef.current = nextTerrain;
+      return;
+    }
 
     nextMatch = {
       ...nextMatch,
@@ -457,17 +1059,17 @@ export default function App(): JSX.Element {
           const hadChute = player.parachutes > 0;
           const shouldConsumeChute = hadChute && player.fallDistance > 16;
           const effectiveFall = hadChute ? player.fallDistance * 0.25 : player.fallDistance;
-          const landingDamage = Math.max(0, effectiveFall - 10) * 0.5;
+          const landingDamage = Math.max(0, effectiveFall - 8) * 0.32;
           const hpAfterLanding = clamp(player.hp - landingDamage, 0, 100);
           if (player.alive && hpAfterLanding <= 0) {
-            enqueueTankDeathFx(runtime, player);
+            enqueueTankDeathFx(runtime, player, () => nextFxIdRef.current++);
           }
           return {
             ...player,
             y: groundY,
             hp: hpAfterLanding,
             maxPower: maxPowerForHp(hpAfterLanding),
-            power: clamp(player.power, 120, maxPowerForHp(hpAfterLanding)),
+            power: clamp(player.power, 200, maxPowerForHp(hpAfterLanding)),
             alive: hpAfterLanding > 0,
             parachutes: shouldConsumeChute ? Math.max(0, player.parachutes - 1) : player.parachutes,
             fallDistance: 0,
@@ -482,17 +1084,17 @@ export default function App(): JSX.Element {
         if (nextY >= groundY) {
           const shouldConsumeChute = usingParachute;
           const effectiveFall = usingParachute ? nextFallDistance * 0.25 : nextFallDistance;
-          const landingDamage = Math.max(0, effectiveFall - 10) * 0.5;
+          const landingDamage = Math.max(0, effectiveFall - 8) * 0.32;
           const hpAfterLanding = clamp(player.hp - landingDamage, 0, 100);
           if (player.alive && hpAfterLanding <= 0) {
-            enqueueTankDeathFx(runtime, player);
+            enqueueTankDeathFx(runtime, player, () => nextFxIdRef.current++);
           }
           return {
             ...player,
             y: groundY,
             hp: hpAfterLanding,
             maxPower: maxPowerForHp(hpAfterLanding),
-            power: clamp(player.power, 120, maxPowerForHp(hpAfterLanding)),
+            power: clamp(player.power, 200, maxPowerForHp(hpAfterLanding)),
             alive: hpAfterLanding > 0,
             parachutes: shouldConsumeChute ? Math.max(0, player.parachutes - 1) : player.parachutes,
             fallDistance: 0,
@@ -523,28 +1125,36 @@ export default function App(): JSX.Element {
         setTerrain(nextTerrain);
         setScreen('matchEnd');
       } else {
-        const regenerated = generateTerrain(postRound.width, postRound.height, postRound.settings.terrainPreset);
-        const spacing = regenerated.width / (postRound.players.length + 1);
-        const reseated = {
-          ...postRound,
-          players: postRound.players.map((p, i) => {
-            const nx = Math.floor(spacing * (i + 1));
-            return {
-              ...p,
-              x: nx,
-              y: regenerated.heights[nx] - 8,
-              fallDistance: 0,
-              selectedWeaponId: p.selectedWeaponId,
-            };
-          }),
-        };
-        runtimeRef.current = { projectiles: [], explosions: [], trails: [] };
-        matchRef.current = reseated;
-        terrainRef.current = regenerated;
-        setMatch(reseated);
-        setTerrain(regenerated);
-        setShopIndex(0);
-        setScreen('shop');
+        void (async () => {
+          const generated = await makeTerrainForRound(
+            postRound.width,
+            postRound.height,
+            postRound.settings.terrainPreset,
+            postRound.players.length,
+          );
+          const regenerated = generated.terrain;
+          const spacing = regenerated.width / (postRound.players.length + 1);
+          const reseated = {
+            ...postRound,
+            players: postRound.players.map((p, i) => {
+              const nx = Math.floor(spacing * (i + 1));
+              return {
+                ...p,
+                x: nx,
+                y: regenerated.heights[nx] - 8,
+                fallDistance: 0,
+                selectedWeaponId: p.selectedWeaponId,
+              };
+            }),
+          };
+          runtimeRef.current = { projectiles: [], explosions: [], trails: [], terrainEdits: [] };
+          matchRef.current = reseated;
+          terrainRef.current = regenerated;
+          setMatch(reseated);
+          setTerrain(regenerated);
+          setShopIndex(0);
+          setScreen('shop');
+        })();
       }
       return;
     }
@@ -564,7 +1174,7 @@ export default function App(): JSX.Element {
 
     matchRef.current = nextMatch;
     terrainRef.current = nextTerrain;
-  }, []);
+  }, [makeTerrainForRound]);
 
   useEffect(() => {
     if (!match || !terrain || screen !== 'battle') {
@@ -589,7 +1199,7 @@ export default function App(): JSX.Element {
       const tuned = {
         ...latestActive,
         angle: shot.angle,
-        power: clamp(shot.power, 120, latestActive.maxPower),
+        power: clamp(shot.power, 200, latestActive.maxPower),
         selectedWeaponId: weaponId,
       };
       const withTune = updatePlayer(match, tuned);
@@ -669,12 +1279,28 @@ export default function App(): JSX.Element {
     }
   }, [applyHeldAimInput, fireWeapon, screen, shieldMenuOpen, stepSimulation]);
 
-  const startShopToBattle = useCallback((existingMatch: MatchState) => {
-    const regenerated = generateTerrain(existingMatch.width, existingMatch.height, existingMatch.settings.terrainPreset);
+  const startShopToBattle = useCallback(async (existingMatch: MatchState) => {
+    const generated = await makeTerrainForRound(
+      existingMatch.width,
+      existingMatch.height,
+      existingMatch.settings.terrainPreset,
+      existingMatch.players.length,
+    );
+    const regenerated = generated.terrain;
     const spacing = regenerated.width / (existingMatch.players.length + 1);
     const players = existingMatch.players.map((p, i) => {
       const x = Math.floor(spacing * (i + 1));
-      const roundReady = { ...p, x, y: regenerated.heights[x] - 8, fallDistance: 0, alive: true, hp: 100, maxPower: 1000, power: clamp(p.power, 120, 1000) };
+      const roundReady = {
+        ...p,
+        x,
+        y: regenerated.heights[x] - 8,
+        fallDistance: 0,
+        alive: true,
+        hp: 100,
+        maxPower: 1000,
+        power: clamp(p.power, 200, 1000),
+        fuel: Math.max(0, p.inventory.fuel ?? 0),
+      };
       return autoActivateShieldAtRoundStart(roundReady);
     });
     const next = { ...existingMatch, players, phase: 'aim' as const, activePlayerId: players[0].config.id };
@@ -682,16 +1308,17 @@ export default function App(): JSX.Element {
     matchRef.current = next;
     setTerrain(regenerated);
     setMatch(next);
-    runtimeRef.current = { projectiles: [], explosions: [], trails: [] };
+    runtimeRef.current = { projectiles: [], explosions: [], trails: [], terrainEdits: [] };
     simulationAccumulatorRef.current = 0;
     uiSyncAccumulatorRef.current = 0;
     powerTickAccumulatorRef.current = 0;
     angleTickAccumulatorRef.current = 0;
     movementTickAccumulatorRef.current = 0;
     setScreen('battle');
-  }, []);
+    setMessage(`Terrain: ${generated.source}`);
+  }, [makeTerrainForRound]);
 
-  const useShieldFromPopup = useCallback((shieldId: 'shield' | 'force-shield' | 'heavy-shield') => {
+  const useShieldFromPopup = useCallback((shieldId: 'shield' | 'medium-shield' | 'heavy-shield') => {
     const liveMatch = matchRef.current;
     if (!liveMatch || liveMatch.phase !== 'aim') {
       return;
@@ -710,7 +1337,7 @@ export default function App(): JSX.Element {
     setMessage(`${active.config.name} activated ${shieldId}`);
   }, []);
 
-  const activeShopPlayer = match?.players[shopIndex] ?? null;
+  const activeShopPlayer = match?.players[shopIndex] ?? match?.players[0] ?? null;
   const activeBattlePlayer = match?.players.find((p) => p.config.id === match.activePlayerId);
   const shieldMenuItems = activeBattlePlayer
     ? SHIELD_ITEMS.map((item) => ({
@@ -758,21 +1385,44 @@ export default function App(): JSX.Element {
             saveProfile(settings, players);
           }}
           onBack={() => setScreen('title')}
-          onNext={() => {
+          onNext={async () => {
             const enabled = playerConfigs.filter((p) => p.enabled);
-            const { match: newMatch, terrain: newTerrain } = initMatch(settings, enabled, window.innerWidth, window.innerHeight);
+            const { match: seededMatch } = initMatch(settings, enabled, window.innerWidth, window.innerHeight);
+            const generated = await makeTerrainForRound(
+              seededMatch.width,
+              seededMatch.height,
+              settings.terrainPreset,
+              seededMatch.players.length,
+            );
+            const newTerrain = generated.terrain;
+            const spacing = newTerrain.width / (seededMatch.players.length + 1);
+            const newMatch = {
+              ...seededMatch,
+              players: seededMatch.players.map((p, i) => {
+                const nx = Math.floor(spacing * (i + 1));
+                return {
+                  ...p,
+                  x: nx,
+                  y: newTerrain.heights[nx] - 8,
+                  fallDistance: 0,
+                };
+              }),
+            };
+            matchRef.current = newMatch;
+            terrainRef.current = newTerrain;
             setMatch(newMatch);
             setTerrain(newTerrain);
             setShopIndex(0);
             setScreen('shop');
+            setMessage(`Terrain ready: ${generated.source}`);
           }}
         />
       )}
 
-      {screen === 'shop' && match && activeShopPlayer && (
+      {screen === 'shop' && match && (
         <ShopScreen
           players={match.players}
-          currentIndex={shopIndex}
+          currentIndex={activeShopPlayer ? match.players.findIndex((p) => p.config.id === activeShopPlayer.config.id) : 0}
           onBuy={(playerId, weaponId) => {
             setMatch((current) => {
               if (!current) {
@@ -798,7 +1448,7 @@ export default function App(): JSX.Element {
           onNext={() => setShopIndex((idx) => clamp(idx + 1, 0, (match?.players.length ?? 1) - 1))}
           onDone={() => {
             if (match) {
-              startShopToBattle(match);
+              void startShopToBattle(match);
             }
           }}
         />

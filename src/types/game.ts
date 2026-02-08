@@ -1,5 +1,5 @@
-export type WindMode = 'off' | 'light' | 'normal' | 'chaotic';
-export type TerrainPreset = 'rolling' | 'canyon' | 'islands' | 'random';
+export type WindMode = 'off' | 'constant' | 'changing';
+export type TerrainPreset = 'rolling' | 'canyon' | 'islands' | 'random' | 'mtn';
 export type AILevel = 'easy' | 'normal' | 'hard';
 export type PlayerKind = 'human' | 'ai';
 export type WeaponSpecial = 'normal' | 'drill' | 'roller' | 'cluster' | 'napalm' | 'nuke';
@@ -83,6 +83,8 @@ export interface TerrainState {
   revision: number;
   heights: number[];
   mask: Uint8Array;
+  colorIndices?: Uint8Array;
+  colorPalette?: Array<[number, number, number]>;
 }
 
 export interface ProjectileState {
@@ -95,6 +97,13 @@ export interface ProjectileState {
   ttl: number;
   splitDepth?: number;
   color?: string;
+  projectileType?: 'ballistic' | 'mirv-carrier' | 'mirv-child' | 'roller' | 'digger' | 'funky-child' | 'delayed-blast' | 'napalm-burn';
+  effectRadius?: number;
+  effectDamage?: number;
+  direction?: number;
+  state?: number;
+  timer?: number;
+  seed?: number;
 }
 
 export interface ExplosionEvent {
@@ -113,14 +122,14 @@ export interface TurnInput {
 }
 
 export const DEFAULT_SETTINGS: GameSettings = {
-  roundsToWin: 3,
-  gravity: 320,
-  windMode: 'normal',
+  roundsToWin: 5,
+  gravity: 260,
+  windMode: 'off',
   terrainPreset: 'random',
-  cashStart: 100000,
+  cashStart: 200000,
   turnTimeLimitSec: null,
   retroPalette: true,
-  powerAdjustHz: 18,
+  powerAdjustHz: 15,
 };
 
 export const TANK_COLORS = [

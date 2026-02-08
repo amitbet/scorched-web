@@ -6,7 +6,7 @@ function randomWind(settings: GameSettings): number {
   if (settings.windMode === 'off') {
     return 0;
   }
-  const max = settings.windMode === 'light' ? 20 : settings.windMode === 'normal' ? 35 : 55;
+  const max = 10;
   return (Math.random() * 2 - 1) * max;
 }
 
@@ -16,9 +16,9 @@ function createPlayerState(config: PlayerConfig, settings: GameSettings): Player
     cash: settings.cashStart,
     armor: 100,
     shield: 0,
-    fuel: 100,
+    fuel: 0,
     parachutes: 0,
-    inventory: { [STARTER_WEAPON_ID]: 99 },
+    inventory: { [STARTER_WEAPON_ID]: 999 },
     alive: true,
     score: 0,
     hp: 100,
@@ -26,8 +26,8 @@ function createPlayerState(config: PlayerConfig, settings: GameSettings): Player
     x: 0,
     y: 0,
     fallDistance: 0,
-    angle: 45,
-    power: 600,
+    angle: 30,
+    power: 300,
     selectedWeaponId: STARTER_WEAPON_ID,
   };
 }
@@ -76,7 +76,12 @@ export function nextActivePlayer(match: MatchState): MatchState {
 
   const index = alive.findIndex((p) => p.config.id === match.activePlayerId);
   const next = alive[(index + 1) % alive.length];
-  return { ...match, activePlayerId: next.config.id, phase: 'aim' };
+  return {
+    ...match,
+    activePlayerId: next.config.id,
+    phase: 'aim',
+    wind: match.settings.windMode === 'changing' ? randomWind(match.settings) : match.wind,
+  };
 }
 
 export function applyRoundEnd(match: MatchState): MatchState {
@@ -87,9 +92,8 @@ export function applyRoundEnd(match: MatchState): MatchState {
     hp: 100,
     maxPower: 1000,
     power: Math.min(p.power, 1000),
-    shield: Math.max(0, p.shield - 10),
+    shield: 0,
     fallDistance: 0,
-    fuel: Math.max(60, p.fuel),
   }));
   const updated = winner
     ? players.map((p) => (p.config.id === winner.config.id ? { ...p, score: p.score + 1 } : p))

@@ -11,7 +11,7 @@ describe('computeExplosionDamage', () => {
       shield: 0,
       armor: 0,
     });
-    expect(result.hpLoss).toBeGreaterThan(35);
+    expect(result.hpLoss).toBeGreaterThan(20);
   });
 
   it('applies shield first and preserves hp when fully absorbed', () => {
@@ -33,7 +33,7 @@ describe('spawnFunkeyBomblets', () => {
     const bomblets = spawnFunkeyBomblets(100, 80, 'p1', 40, -20);
     expect(bomblets).toHaveLength(6);
     expect(new Set(bomblets.map((b) => b.color)).size).toBeGreaterThan(3);
-    expect(bomblets.every((b) => b.weaponId === 'funkey-bomb')).toBe(true);
+    expect(bomblets.every((b) => b.weaponId === 'funky-bomb')).toBe(true);
     expect(bomblets.every((b) => b.splitDepth === 1)).toBe(true);
   });
 });

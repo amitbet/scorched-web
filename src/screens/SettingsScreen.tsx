@@ -9,9 +9,9 @@ interface SettingsScreenProps {
 export function SettingsScreen({ settings, onChange, onBack }: SettingsScreenProps): JSX.Element {
   return (
     <div className="screen panel settings-screen">
-      <h2>Game Settings</h2>
+      <h2>Game Options</h2>
       <label>
-        Rounds To Win
+        Number Of Rounds
         <input
           type="number"
           min={1}
@@ -24,8 +24,8 @@ export function SettingsScreen({ settings, onChange, onBack }: SettingsScreenPro
         Gravity
         <input
           type="range"
-          min={180}
-          max={480}
+          min={160}
+          max={420}
           value={settings.gravity}
           onChange={(e) => onChange({ ...settings, gravity: Number(e.target.value) })}
         />
@@ -34,10 +34,9 @@ export function SettingsScreen({ settings, onChange, onBack }: SettingsScreenPro
       <label>
         Wind
         <select value={settings.windMode} onChange={(e) => onChange({ ...settings, windMode: e.target.value as GameSettings['windMode'] })}>
-          <option value="off">Off</option>
-          <option value="light">Light</option>
-          <option value="normal">Normal</option>
-          <option value="chaotic">Chaotic</option>
+          <option value="constant">Constant Wind</option>
+          <option value="off">No Wind</option>
+          <option value="changing">Changing Wind</option>
         </select>
       </label>
       <label>
@@ -47,14 +46,15 @@ export function SettingsScreen({ settings, onChange, onBack }: SettingsScreenPro
           <option value="canyon">Canyon</option>
           <option value="islands">Islands</option>
           <option value="random">Random</option>
+          <option value="mtn">MTN</option>
         </select>
       </label>
       <label>
         Starting Cash
         <input
           type="number"
-          min={1000}
-          max={50000}
+          min={0}
+          max={500000}
           step={100}
           value={settings.cashStart}
           onChange={(e) => onChange({ ...settings, cashStart: Number(e.target.value) })}

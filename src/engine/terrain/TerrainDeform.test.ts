@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { generateTerrain } from './TerrainGenerator';
-import { carveCrater } from './TerrainDeform';
+import { addDirt, carveCrater } from './TerrainDeform';
 import type { TerrainState } from '../../types/game';
 
 describe('TerrainDeform', () => {
@@ -25,5 +25,13 @@ describe('TerrainDeform', () => {
     const terrain: TerrainState = { width, height, heights, mask, revision: 0 };
     const next = carveCrater(terrain, 15, 14, 4);
     expect(next.heights[15]).toBeGreaterThan(terrain.heights[15]);
+  });
+
+  it('adds dirt for sand-style weapons', () => {
+    const terrain = generateTerrain(160, 100, 'rolling');
+    const before = terrain.mask.reduce((a, b) => a + b, 0);
+    const next = addDirt(terrain, 80, 60, 20, 12);
+    const after = next.mask.reduce((a, b) => a + b, 0);
+    expect(after).toBeGreaterThan(before);
   });
 });

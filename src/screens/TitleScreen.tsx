@@ -48,12 +48,12 @@ export function TitleScreen({ onStart, onSettings, onLoad }: TitleScreenProps): 
     <div className="screen title-screen">
       <canvas ref={canvasRef} className="title-canvas" />
       <div className="title-overlay panel">
-        <h1>Scorched Earth</h1>
+        <h1>Scorched Earth 2000</h1>
         <p className="subtitle">The Mother Of All Games</p>
-        <button onClick={onStart}>Start Match</button>
-        <button onClick={onSettings}>Settings</button>
+        <button onClick={onStart}>Create Game</button>
+        <button onClick={onSettings}>Game Options</button>
         <button onClick={onLoad}>Load Profile</button>
-        <button onClick={onStart}>Quit</button>
+        <button onClick={onStart}>Join Game</button>
       </div>
     </div>
   );

@@ -9,7 +9,7 @@ const basePlayer: PlayerState = {
   shield: 0,
   fuel: 100,
   parachutes: 0,
-  inventory: { baby: 99 },
+  inventory: { missile: 999 },
   alive: true,
   score: 0,
   hp: 100,
@@ -19,25 +19,25 @@ const basePlayer: PlayerState = {
   fallDistance: 0,
   angle: 45,
   power: 500,
-  selectedWeaponId: 'baby',
+  selectedWeaponId: 'missile',
 };
 
 describe('Shield', () => {
   it('activates shield from inventory and consumes one item', () => {
     const p = { ...basePlayer, inventory: { ...basePlayer.inventory, shield: 2 } };
     const next = activateShieldFromInventory(p, 'shield');
-    expect(next.shield).toBe(35);
+    expect(next.shield).toBe(220);
     expect(next.inventory.shield).toBe(1);
   });
 
   it('auto-defense uses strongest available shield at round start', () => {
     const p = {
       ...basePlayer,
-      inventory: { ...basePlayer.inventory, 'auto-defense': 1, shield: 1, 'force-shield': 1 },
+      inventory: { ...basePlayer.inventory, 'auto-defense': 1, shield: 1, 'medium-shield': 1 },
     };
     const next = autoActivateShieldAtRoundStart(p);
-    expect(next.shield).toBe(55);
-    expect(next.inventory['force-shield']).toBe(0);
+    expect(next.shield).toBe(420);
+    expect(next.inventory['medium-shield']).toBe(0);
     expect(next.inventory.shield).toBe(1);
   });
 });

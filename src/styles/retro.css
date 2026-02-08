@@ -105,8 +105,26 @@ button:disabled {
 }
 
 .shop-screen {
+  height: calc(100vh - 32px);
   max-height: calc(100vh - 32px);
-  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
+  overflow: hidden;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  gap: 12px;
+}
+
+.shop-head {
+  display: grid;
+  gap: 4px;
+}
+
+.shop-cash {
+  color: #f7dc9b;
+}
+
+.shop-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 label {
@@ -138,30 +156,61 @@ label {
 
 .shop-grid {
   min-height: 0;
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
   display: grid;
   gap: 8px;
-  padding-right: 4px;
+  padding-right: 6px;
 }
 
 .weapon-row {
-  border: 1px solid #50506b;
-  padding: 8px;
+  border: 1px solid #5e6389;
+  background: linear-gradient(90deg, rgba(20, 22, 36, 0.95), rgba(13, 15, 27, 0.95));
+  padding: 10px;
   display: flex;
   justify-content: space-between;
-  align-items: center;
-  gap: 8px;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.weapon-info {
+  min-width: 0;
 }
 
 .weapon-meta {
-  color: #b6bad9;
+  color: #bfc6ea;
   font-size: 12px;
 }
 
 .weapon-controls {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   align-items: center;
+  justify-content: flex-end;
+}
+
+.shop-actions {
+  justify-content: space-between;
+  align-items: center;
+  border-top: 1px solid #4e5273;
+  padding-top: 8px;
+}
+
+@media (max-width: 860px) {
+  .shop-screen {
+    height: calc(100vh - 16px);
+    max-height: calc(100vh - 16px);
+  }
+
+  .weapon-row {
+    flex-direction: column;
+  }
+
+  .weapon-controls {
+    width: 100%;
+    justify-content: flex-start;
+  }
 }
 
 .battle-screen {

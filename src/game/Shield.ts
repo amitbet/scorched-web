@@ -1,18 +1,18 @@
 import type { PlayerState } from '../types/game';
 
 export interface ShieldItemDef {
-  id: 'shield' | 'force-shield' | 'heavy-shield';
+  id: 'shield' | 'medium-shield' | 'heavy-shield';
   name: string;
   boost: number;
 }
 
 export const SHIELD_ITEMS: ShieldItemDef[] = [
-  { id: 'shield', name: 'Shield', boost: 35 },
-  { id: 'force-shield', name: 'Force Shield', boost: 55 },
-  { id: 'heavy-shield', name: 'Heavy Shield', boost: 85 },
+  { id: 'shield', name: 'Shield', boost: 220 },
+  { id: 'medium-shield', name: 'Medium Shield', boost: 420 },
+  { id: 'heavy-shield', name: 'Heavy Shield', boost: 700 },
 ];
 
-const AUTO_DEFENSE_PRIORITY: ShieldItemDef['id'][] = ['heavy-shield', 'force-shield', 'shield'];
+const AUTO_DEFENSE_PRIORITY: ShieldItemDef['id'][] = ['heavy-shield', 'medium-shield', 'shield'];
 
 function clamp(v: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, v));
@@ -30,7 +30,7 @@ export function activateShieldFromInventory(player: PlayerState, shieldId: Shiel
   return {
     ...player,
     inventory: { ...player.inventory, [shieldId]: has - 1 },
-    shield: clamp(player.shield + def.boost, 0, 160),
+    shield: clamp(player.shield + def.boost, 0, 1000),
   };
 }
 

@@ -2,16 +2,36 @@ import { useCallback, useEffect, useRef } from 'react';
 import Phaser from 'phaser';
 import type { MatchState, TerrainState } from '../types/game';
 import { TANK_COLORS } from '../types/game';
+import { drawNukeExplosion } from '../game/fx/nukeEffect';
 
 export interface BattleRuntimeSnapshot {
-  projectiles: { x: number; y: number; ownerId: string; color?: string }[];
-  explosions: { x: number; y: number; radius: number; life: number; color?: string }[];
+  projectiles: {
+    x: number;
+    y: number;
+    ownerId: string;
+    weaponId: string;
+    color?: string;
+    projectileType?: 'ballistic' | 'mirv-carrier' | 'mirv-child' | 'roller' | 'digger' | 'funky-child' | 'delayed-blast' | 'napalm-burn';
+  }[];
+  explosions: {
+    id: number;
+    x: number;
+    y: number;
+    radius: number;
+    life: number;
+    maxLife?: number;
+    color?: string;
+    kind?: 'burst' | 'simple' | 'fire' | 'laser' | 'sand' | 'funky' | 'nuke';
+    beamHeight?: number;
+    seed?: number;
+  }[];
   trails: { x1: number; y1: number; x2: number; y2: number; ownerId: string; life: number; color?: string }[];
 }
 
 export interface BattleInputState {
   moveLeft: boolean;
   moveRight: boolean;
+  alt: boolean;
   left: boolean;
   right: boolean;
   up: boolean;
@@ -30,17 +50,21 @@ interface BattleScreenProps {
   message: string;
   shieldMenuOpen: boolean;
   shieldMenuPlayerName: string;
-  shieldMenuItems: Array<{ id: 'shield' | 'force-shield' | 'heavy-shield'; name: string; count: number; boost: number }>;
+  shieldMenuItems: Array<{ id: 'shield' | 'medium-shield' | 'heavy-shield'; name: string; count: number; boost: number }>;
   onCloseShieldMenu: () => void;
-  onActivateShield: (shieldId: 'shield' | 'force-shield' | 'heavy-shield') => void;
+  onActivateShield: (shieldId: 'shield' | 'medium-shield' | 'heavy-shield') => void;
   getSnapshot: () => { match: MatchState | null; terrain: TerrainState | null; runtime: BattleRuntimeSnapshot; message: string };
   onInputFrame: (input: BattleInputState, deltaMs: number) => void;
 }
 
 class BattleScene extends Phaser.Scene {
+  private readonly terrainTextureKey = 'battle-terrain-layer';
+  private terrainTextureMeta: { revision: number; width: number; height: number; colored: boolean } | null = null;
   private getSnapshot!: BattleScreenProps['getSnapshot'];
   private onInputFrame!: BattleScreenProps['onInputFrame'];
+  private backgroundGraphics!: Phaser.GameObjects.Graphics;
   private graphics!: Phaser.GameObjects.Graphics;
+  private terrainImage: Phaser.GameObjects.Image | null = null;
   private hudText!: Phaser.GameObjects.Text;
   private noteText!: Phaser.GameObjects.Text;
   private keys!: {
@@ -56,12 +80,15 @@ class BattleScene extends Phaser.Scene {
     tab: Phaser.Input.Keyboard.Key;
     i: Phaser.Input.Keyboard.Key;
     shift: Phaser.Input.Keyboard.Key;
+    alt: Phaser.Input.Keyboard.Key;
   };
   private prevFire = false;
   private prevTab = false;
   private prevI = false;
   private pendingPowerSet: number | null = null;
   private stars: { x: number; y: number; alpha: number }[] = [];
+  private seenExplosionIds = new Set<number>();
+  private audioCtx: AudioContext | null = null;
 
   private getPowerBarRect(width: number): { x: number; y: number; w: number; h: number } {
     return { x: Math.max(300, width - 180), y: 4, w: 150, h: 10 };
@@ -77,12 +104,14 @@ class BattleScene extends Phaser.Scene {
   }
 
   create(): void {
+    this.backgroundGraphics = this.add.graphics();
+    this.backgroundGraphics.setDepth(1);
     this.graphics = this.add.graphics();
-    this.graphics.setDepth(2);
+    this.graphics.setDepth(3);
     this.hudText = this.add.text(8, 6, '', { fontFamily: 'Courier New', fontSize: '12px', color: '#111111' });
-    this.hudText.setDepth(3);
+    this.hudText.setDepth(4);
     this.noteText = this.add.text(8, 22, '', { fontFamily: 'Courier New', fontSize: '12px', color: '#111111' });
-    this.noteText.setDepth(3);
+    this.noteText.setDepth(4);
 
     const input = this.input.keyboard;
     if (!input) {
@@ -102,6 +131,7 @@ class BattleScene extends Phaser.Scene {
       tab: input.addKey(Phaser.Input.Keyboard.KeyCodes.TAB),
       i: input.addKey(Phaser.Input.Keyboard.KeyCodes.I),
       shift: input.addKey(Phaser.Input.Keyboard.KeyCodes.SHIFT),
+      alt: input.addKey(Phaser.Input.Keyboard.KeyCodes.ALT),
     };
 
     input.on('keydown-TAB', (event: KeyboardEvent) => {
@@ -131,7 +161,7 @@ class BattleScene extends Phaser.Scene {
         return;
       }
       const ratio = Phaser.Math.Clamp((pointer.x - bar.x) / bar.w, 0, 1);
-      this.pendingPowerSet = Math.round(120 + ratio * (active.maxPower - 120));
+      this.pendingPowerSet = Math.round(200 + ratio * (active.maxPower - 200));
     });
 
     let seed = 1337;
@@ -145,9 +175,13 @@ class BattleScene extends Phaser.Scene {
   update(_time: number, deltaMs: number): void {
     const snapshot = this.getSnapshot();
     if (!snapshot.match || !snapshot.terrain) {
+      this.backgroundGraphics.clear();
       this.graphics.clear();
-      this.graphics.fillStyle(0x090c2b, 1);
-      this.graphics.fillRect(0, 0, this.scale.width, this.scale.height);
+      this.backgroundGraphics.fillStyle(0x090c2b, 1);
+      this.backgroundGraphics.fillRect(0, 0, this.scale.width, this.scale.height);
+      if (this.terrainImage) {
+        this.terrainImage.setVisible(false);
+      }
       return;
     }
 
@@ -157,6 +191,7 @@ class BattleScene extends Phaser.Scene {
     const input: BattleInputState = {
       moveLeft: this.keys.a.isDown,
       moveRight: this.keys.d.isDown,
+      alt: this.keys.alt.isDown,
       left: this.keys.left.isDown,
       right: this.keys.right.isDown,
       up: this.keys.up.isDown,
@@ -175,7 +210,144 @@ class BattleScene extends Phaser.Scene {
 
     this.onInputFrame(input, deltaMs);
 
+    for (const exp of snapshot.runtime.explosions) {
+      if (this.seenExplosionIds.has(exp.id)) {
+        continue;
+      }
+      this.seenExplosionIds.add(exp.id);
+      this.playExplosionSfx(exp.kind, exp.radius);
+    }
+
     this.renderFrame(snapshot.match, snapshot.terrain, snapshot.runtime, snapshot.message);
+  }
+
+  private playExplosionSfx(kind: BattleRuntimeSnapshot['explosions'][number]['kind'], radius: number): void {
+    const Ctx = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!Ctx) {
+      return;
+    }
+    if (!this.audioCtx) {
+      this.audioCtx = new Ctx();
+    }
+    const ctx = this.audioCtx;
+    if (ctx.state === 'suspended') {
+      void ctx.resume();
+    }
+
+    const now = ctx.currentTime;
+    const gain = ctx.createGain();
+    gain.connect(ctx.destination);
+
+    if (kind === 'fire') {
+      const noise = ctx.createBufferSource();
+      const buffer = ctx.createBuffer(1, Math.floor(ctx.sampleRate * 0.12), ctx.sampleRate);
+      const data = buffer.getChannelData(0);
+      for (let i = 0; i < data.length; i += 1) {
+        data[i] = (Math.random() * 2 - 1) * 0.35;
+      }
+      noise.buffer = buffer;
+      const filter = ctx.createBiquadFilter();
+      filter.type = 'bandpass';
+      filter.frequency.value = 900;
+      noise.connect(filter);
+      filter.connect(gain);
+      gain.gain.setValueAtTime(0.02, now);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.14);
+      noise.start(now);
+      noise.stop(now + 0.14);
+      return;
+    }
+
+    const osc = ctx.createOscillator();
+    osc.type = kind === 'laser' ? 'square' : 'triangle';
+    const startFreq = kind === 'simple' ? 220 + radius * 3.8 : 150 + radius * 1.8;
+    osc.frequency.setValueAtTime(startFreq, now);
+    osc.frequency.exponentialRampToValueAtTime(Math.max(50, startFreq * 0.22), now + 0.2);
+    osc.connect(gain);
+    gain.gain.setValueAtTime(0.04, now);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.22);
+    osc.start(now);
+    osc.stop(now + 0.22);
+  }
+
+  private updateTerrainTexture(terrain: TerrainState, innerY: number): void {
+    const colorIndices = terrain.colorIndices;
+    const palette = terrain.colorPalette;
+    const colored = Boolean(colorIndices && palette && palette.length > 0);
+    const cacheValid = this.terrainTextureMeta
+      && this.terrainTextureMeta.revision === terrain.revision
+      && this.terrainTextureMeta.width === terrain.width
+      && this.terrainTextureMeta.height === terrain.height
+      && this.terrainTextureMeta.colored === colored;
+    if (cacheValid) {
+      if (this.terrainImage) {
+        this.terrainImage.setVisible(true);
+      }
+      return;
+    }
+
+    if (this.textures.exists(this.terrainTextureKey)) {
+      const existing = this.textures.get(this.terrainTextureKey) as Phaser.Textures.CanvasTexture;
+      if (existing.getSourceImage().width !== terrain.width || existing.getSourceImage().height !== terrain.height) {
+        this.textures.remove(this.terrainTextureKey);
+      }
+    }
+
+    const texture = this.textures.exists(this.terrainTextureKey)
+      ? this.textures.get(this.terrainTextureKey) as Phaser.Textures.CanvasTexture
+      : this.textures.createCanvas(this.terrainTextureKey, terrain.width, terrain.height);
+    if (!texture) {
+      throw new Error('Failed to create terrain canvas texture');
+    }
+    const ctx = texture.getContext();
+    const image = ctx.createImageData(terrain.width, terrain.height);
+    const data = image.data;
+
+    for (let x = 0; x < terrain.width; x += 1) {
+      const top = Math.max(innerY, terrain.heights[x]);
+      if (top >= terrain.height) {
+        continue;
+      }
+      for (let y = top; y < terrain.height; y += 1) {
+        const cell = y * terrain.width + x;
+        if (terrain.mask[cell] !== 1) {
+          continue;
+        }
+        let r = y === top ? 0x7d : 0x45;
+        let g = y === top ? 0xff : 0xe3;
+        let b = y === top ? 0x8d : 0x5e;
+        if (colored && colorIndices && palette) {
+          const idx = colorIndices[cell] & 0x0f;
+          const swatch = idx > 0 ? palette[idx] : null;
+          if (swatch) {
+            r = swatch[0];
+            g = swatch[1];
+            b = swatch[2];
+          }
+        }
+        const out = cell * 4;
+        data[out] = r;
+        data[out + 1] = g;
+        data[out + 2] = b;
+        data[out + 3] = 255;
+      }
+    }
+
+    ctx.putImageData(image, 0, 0);
+    texture.refresh();
+
+    if (!this.terrainImage) {
+      this.terrainImage = this.add.image(0, 0, this.terrainTextureKey).setOrigin(0, 0).setDepth(2);
+    } else {
+      this.terrainImage.setTexture(this.terrainTextureKey);
+    }
+    this.terrainImage.setVisible(true);
+    this.terrainTextureMeta = {
+      revision: terrain.revision,
+      width: terrain.width,
+      height: terrain.height,
+      colored,
+    };
   }
 
   private renderFrame(match: MatchState, terrain: TerrainState, runtime: BattleRuntimeSnapshot, message: string): void {
@@ -184,31 +356,24 @@ class BattleScene extends Phaser.Scene {
     const innerY = hudH + 2;
     const innerW = match.width - 4;
     const innerH = match.height - hudH - 4;
-    this.graphics.clear();
-    this.graphics.fillStyle(0x090c2b, 1);
-    this.graphics.fillRect(0, 0, match.width, match.height);
-    this.graphics.fillStyle(0x0b1242, 1);
-    this.graphics.fillRect(innerX, innerY, innerW, innerH);
+    this.backgroundGraphics.clear();
+    this.backgroundGraphics.fillStyle(0x090c2b, 1);
+    this.backgroundGraphics.fillRect(0, 0, match.width, match.height);
+    this.backgroundGraphics.fillStyle(0x0b1242, 1);
+    this.backgroundGraphics.fillRect(innerX, innerY, innerW, innerH);
     for (const star of this.stars) {
       const sx = Math.floor(innerX + star.x * innerW);
       const sy = Math.floor(innerY + star.y * innerH);
-      this.graphics.fillStyle(0xd6d8ff, star.alpha);
-      this.graphics.fillRect(sx, sy, 1, 1);
+      this.backgroundGraphics.fillStyle(0xd6d8ff, star.alpha);
+      this.backgroundGraphics.fillRect(sx, sy, 1, 1);
     }
     for (let y = innerY; y < innerY + innerH; y += 2) {
-      this.graphics.fillStyle(y % 4 === 0 ? 0xffffff : 0x000000, 0.06);
-      this.graphics.fillRect(innerX, y, innerW, 1);
+      this.backgroundGraphics.fillStyle(y % 4 === 0 ? 0xffffff : 0x000000, 0.06);
+      this.backgroundGraphics.fillRect(innerX, y, innerW, 1);
     }
-    for (let x = 0; x < terrain.width; x += 1) {
-      const top = Math.max(innerY, terrain.heights[x]);
-      if (top >= terrain.height) {
-        continue;
-      }
-      this.graphics.fillStyle(0x45e35e, 1);
-      this.graphics.fillRect(x, top, 1, terrain.height - top);
-      this.graphics.fillStyle(0x7dff8d, 1);
-      this.graphics.fillRect(x, top, 1, 1);
-    }
+    this.updateTerrainTexture(terrain, innerY);
+
+    this.graphics.clear();
 
     for (const player of match.players) {
       if (!player.alive) {
@@ -270,16 +435,111 @@ class BattleScene extends Phaser.Scene {
           : owner
             ? Phaser.Display.Color.HexStringToColor(TANK_COLORS[owner.config.colorIndex % TANK_COLORS.length]).color
             : 0xffffff;
+      if (projectile.projectileType === 'roller') {
+        this.graphics.fillStyle(0xececec, 1);
+        this.graphics.fillCircle(projectile.x, projectile.y, 2.1);
+        this.graphics.fillStyle(0x1a1a1a, 1);
+        this.graphics.fillRect(projectile.x - 1, projectile.y - 1, 1, 1);
+        this.graphics.fillRect(projectile.x, projectile.y, 1, 1);
+        continue;
+      }
+      if (projectile.projectileType === 'digger') {
+        this.graphics.fillStyle(0xd2b377, 1);
+        this.graphics.fillRect(Math.floor(projectile.x), Math.floor(projectile.y), 1, 1);
+        continue;
+      }
+      if (projectile.projectileType === 'napalm-burn') {
+        this.graphics.fillStyle(0xffd14a, 0.85);
+        this.graphics.fillRect(Math.floor(projectile.x), Math.floor(projectile.y), 2, 2);
+        continue;
+      }
       this.graphics.fillStyle(color, 1);
       this.graphics.fillRect(Math.floor(projectile.x), Math.floor(projectile.y), 2, 2);
     }
 
     for (const exp of runtime.explosions) {
-      const alpha = Math.max(0, exp.life / 0.3);
+      const maxLife = Math.max(0.001, exp.maxLife ?? exp.life);
+      const progress = Phaser.Math.Clamp(1 - exp.life / maxLife, 0, 1);
+      const alpha = Phaser.Math.Clamp(exp.life / maxLife, 0, 1);
       const main = exp.color ? Phaser.Display.Color.HexStringToColor(exp.color).color : 0xffb31f;
+
+      if (exp.kind === 'laser') {
+        const beamHeight = exp.beamHeight ?? 160;
+        const top = Math.max(2, exp.y - beamHeight * (0.25 + progress * 0.75));
+        this.graphics.lineStyle(Math.max(1, exp.radius * 0.35), 0x6ce2ff, alpha * 0.9);
+        this.graphics.lineBetween(exp.x, exp.y, exp.x, top);
+        this.graphics.lineStyle(Math.max(1, exp.radius * 0.14), 0xffffff, alpha);
+        this.graphics.lineBetween(exp.x, exp.y, exp.x, top);
+        continue;
+      }
+
+      if (exp.kind === 'sand') {
+        const puffs = 28;
+        for (let i = 0; i < puffs; i += 1) {
+          const a = (Math.PI * 2 * i) / puffs;
+          const dist = exp.radius * (0.2 + progress * 0.8) * (0.6 + (i % 5) * 0.1);
+          const px = exp.x + Math.cos(a) * dist;
+          const py = exp.y - progress * exp.radius * 0.5 + Math.sin(a) * dist * 0.35;
+          this.graphics.fillStyle(i % 2 === 0 ? 0xe8d79a : 0xc7b27a, alpha * 0.6);
+          this.graphics.fillRect(px, py, 2, 2);
+        }
+        continue;
+      }
+
+      if (exp.kind === 'fire') {
+        const flameH = exp.radius * (1.2 + progress * 0.9);
+        this.graphics.fillStyle(0xff9b2b, alpha * 0.45);
+        this.graphics.fillEllipse(exp.x, exp.y - flameH * 0.38, exp.radius * 1.3, flameH);
+        this.graphics.fillStyle(0xff4f1f, alpha * 0.7);
+        this.graphics.fillEllipse(exp.x, exp.y - flameH * 0.3, exp.radius * 0.9, flameH * 0.68);
+        this.graphics.fillStyle(0xffef96, alpha * 0.9);
+        this.graphics.fillEllipse(exp.x, exp.y - flameH * 0.18, exp.radius * 0.45, flameH * 0.4);
+        continue;
+      }
+
+      if (exp.kind === 'funky') {
+        const funkyColors = [0xff2e2e, 0xffb11f, 0xf8ff3c, 0x4cff63, 0x3ec8ff, 0x6c54ff];
+        for (let i = 0; i < funkyColors.length; i += 1) {
+          const r = exp.radius * (0.22 + i * 0.13 + progress * 0.35);
+          this.graphics.lineStyle(2, funkyColors[i], alpha * (0.95 - i * 0.12));
+          this.graphics.strokeCircle(exp.x, exp.y, r);
+        }
+        continue;
+      }
+
+      if (exp.kind === 'simple') {
+        const rNow = Math.max(2, exp.radius * (0.1 + progress * 0.95));
+        const seed = exp.seed ?? 1337;
+        this.graphics.fillStyle(0xff9b00, alpha * 0.18);
+        this.graphics.fillCircle(exp.x, exp.y, rNow);
+        this.graphics.lineStyle(2, 0xffea5b, alpha * 0.95);
+        this.graphics.strokeCircle(exp.x, exp.y, rNow * 0.8);
+        this.graphics.lineStyle(1.5, 0x3d3d3d, alpha * 0.6);
+        this.graphics.strokeCircle(exp.x, exp.y, rNow * 0.48);
+        this.graphics.lineStyle(1, 0xffffff, alpha * 0.9);
+        this.graphics.strokeCircle(exp.x, exp.y, rNow * 0.3);
+
+        // Java's SimpleExplosion has noisy/random rings; emulate with deterministic speckles.
+        for (let i = 0; i < 34; i += 1) {
+          const t = ((seed % 97) + i * 31 + Math.floor(progress * 200)) * 0.17;
+          const a = t % (Math.PI * 2);
+          const rr = rNow * (0.22 + ((seed + i * 19) % 100) / 100 * 0.72);
+          const px = exp.x + Math.cos(a) * rr;
+          const py = exp.y + Math.sin(a) * rr;
+          this.graphics.fillStyle(i % 2 === 0 ? 0xffe54b : 0xff5a24, alpha * 0.7);
+          this.graphics.fillRect(px, py, 1, 1);
+        }
+        continue;
+      }
+
+      if (exp.kind === 'nuke') {
+        drawNukeExplosion(this.graphics, exp);
+        continue;
+      }
+
       this.graphics.fillStyle(main, alpha);
       this.graphics.fillCircle(exp.x, exp.y, exp.radius);
-      this.graphics.fillStyle(0xff5722, alpha);
+      this.graphics.fillStyle(0xff5722, alpha * 0.95);
       this.graphics.fillCircle(exp.x, exp.y, exp.radius * 0.55);
     }
 
@@ -297,13 +557,13 @@ class BattleScene extends Phaser.Scene {
       const bar = this.getPowerBarRect(match.width);
       this.graphics.fillStyle(0x2c2c2c, 1);
       this.graphics.fillRect(bar.x, bar.y, bar.w, bar.h);
-      const fillW = Math.round(((active.power - 120) / Math.max(1, active.maxPower - 120)) * bar.w);
+      const fillW = Math.round(((active.power - 200) / Math.max(1, active.maxPower - 200)) * bar.w);
       this.graphics.fillStyle(0x7b1010, 1);
       this.graphics.fillRect(bar.x, bar.y, Phaser.Math.Clamp(fillW, 0, bar.w), bar.h);
       this.graphics.lineStyle(1, 0x111111, 1);
       this.graphics.strokeRect(bar.x, bar.y, bar.w, bar.h);
-      this.hudText.setText(`Power: ${Math.round(active.power)}  Max:${Math.round(active.maxPower)}  Angle: ${Math.round(active.angle)}   ${active.config.name}   -> ${active.selectedWeaponId}   Wind: ${Math.round(Math.abs(match.wind))}${match.wind >= 0 ? '>' : '<'}`);
-      this.noteText.setText(`${message || `Round ${match.roundIndex}`}   HP:${Math.round(active.hp)}   Fuel:${Math.round(active.fuel)}   Chutes:${active.parachutes}`);
+      this.hudText.setText(`Ammo:${active.inventory[active.selectedWeaponId] ?? 0}  Power:${Math.round(active.power)}  Limit:${Math.round(active.maxPower)}  Angle:${Math.round(active.angle)}  Weapon:${active.selectedWeaponId}  Wind:${Math.round(Math.abs(match.wind * 8))}${match.wind >= 0 ? '->' : '<-'}`);
+      this.noteText.setText(`${message || `Round ${match.roundIndex}/${match.settings.roundsToWin}`}  Health:${Math.round(active.hp)}%  Fuel:${Math.round(active.fuel)}  Chutes:${active.parachutes}`);
     }
   }
 }
@@ -373,7 +633,7 @@ export function BattleScreen({
   return (
     <div className="screen battle-screen">
       <div ref={hostRef} className="battle-host" />
-      <div className="battle-note-overlay">{`${message || `Round ${match.roundIndex}`} | Controls: A/D move, Arrows aim/power, PgUp/PgDn +/-15, Tab weapon, I shields, Click power bar`}</div>
+      <div className="battle-note-overlay">{`${message || `Round ${match.roundIndex}`} | Controls: A/D fuel move, Arrows angle/power, Alt+Up/Down fast power, Alt+Left/Right quick angle, Tab weapon, I inventory shields`}</div>
       {shieldMenuOpen && (
         <div className="shield-popup">
           <div className="shield-popup-title">{`Shield Settings - ${shieldMenuPlayerName}`}</div>
