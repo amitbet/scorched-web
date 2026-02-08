@@ -14,6 +14,9 @@ function fakeMatch(): MatchState {
       turnTimeLimitSec: null,
       retroPalette: true,
       powerAdjustHz: 18,
+      freeFireMode: false,
+      shotTraces: false,
+      tankColorTrails: true,
     },
     players: [
       {

@@ -27,7 +27,7 @@ function createPlayerState(config: PlayerConfig, settings: GameSettings): Player
     y: 0,
     fallDistance: 0,
     angle: 30,
-    power: 300,
+    power: 200,
     selectedWeaponId: STARTER_WEAPON_ID,
   };
 }
@@ -91,7 +91,7 @@ export function applyRoundEnd(match: MatchState): MatchState {
     alive: true,
     hp: 100,
     maxPower: 1000,
-    power: Math.min(p.power, 1000),
+    power: 200,
     shield: 0,
     fallDistance: 0,
   }));

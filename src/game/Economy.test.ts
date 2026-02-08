@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { buyWeapon, sellWeapon } from './Economy';
+import { getWeaponById } from './WeaponCatalog';
 import type { PlayerState } from '../types/game';
 
 const basePlayer: PlayerState = {
@@ -25,8 +26,9 @@ const basePlayer: PlayerState = {
 describe('Economy', () => {
   it('buys weapon when enough cash', () => {
     const next = buyWeapon(basePlayer, 'baby-digger');
+    const weapon = getWeaponById('baby-digger');
     expect(next.cash).toBeLessThan(basePlayer.cash);
-    expect(next.inventory['baby-digger']).toBe(1);
+    expect(next.inventory['baby-digger']).toBe(weapon.packQty);
   });
 
   it('sells owned weapon and increases cash', () => {

@@ -89,6 +89,30 @@ export function SettingsScreen({ settings, onChange, onBack }: SettingsScreenPro
         />
         Retro Palette
       </label>
+      <label>
+        <input
+          type="checkbox"
+          checked={settings.freeFireMode}
+          onChange={(e) => onChange({ ...settings, freeFireMode: e.target.checked })}
+        />
+        Free Fire Mode (Infinite All Weapons)
+      </label>
+      <label>
+        <input
+          type="checkbox"
+          checked={settings.tankColorTrails}
+          onChange={(e) => onChange({ ...settings, tankColorTrails: e.target.checked })}
+        />
+        Tank-Colored Traces
+      </label>
+      <label>
+        <input
+          type="checkbox"
+          checked={settings.shotTraces}
+          onChange={(e) => onChange({ ...settings, shotTraces: e.target.checked })}
+        />
+        Shot Traces (Persistent)
+      </label>
       <div className="row">
         <button onClick={onBack}>Back</button>
       </div>

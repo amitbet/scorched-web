@@ -15,6 +15,9 @@ export interface GameSettings {
   turnTimeLimitSec: number | null;
   retroPalette: boolean;
   powerAdjustHz: number;
+  freeFireMode: boolean;
+  tankColorTrails: boolean;
+  shotTraces: boolean;
 }
 
 export interface PlayerConfig {
@@ -97,7 +100,7 @@ export interface ProjectileState {
   ttl: number;
   splitDepth?: number;
   color?: string;
-  projectileType?: 'ballistic' | 'mirv-carrier' | 'mirv-child' | 'roller' | 'digger' | 'funky-child' | 'delayed-blast' | 'napalm-burn';
+  projectileType?: 'ballistic' | 'mirv-carrier' | 'mirv-child' | 'roller' | 'digger' | 'sandhog' | 'funky-child' | 'delayed-blast' | 'napalm-burn';
   effectRadius?: number;
   effectDamage?: number;
   direction?: number;
@@ -130,6 +133,9 @@ export const DEFAULT_SETTINGS: GameSettings = {
   turnTimeLimitSec: null,
   retroPalette: true,
   powerAdjustHz: 15,
+  freeFireMode: false,
+  tankColorTrails: true,
+  shotTraces: false,
 };
 
 export const TANK_COLORS = [

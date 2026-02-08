@@ -1,6 +1,6 @@
 import type { ProjectileState } from '../../types/game';
 
-export type ImpactMode = 'default' | 'mirv' | 'roller' | 'digger' | 'funky' | 'napalm' | 'sand';
+export type ImpactMode = 'default' | 'mirv' | 'roller' | 'digger' | 'sandhog' | 'funky' | 'napalm' | 'sand' | 'dirt' | 'liquid';
 
 export interface WeaponRuntimeSpec {
   id: string;
@@ -9,6 +9,7 @@ export interface WeaponRuntimeSpec {
   mirvChildCount?: number;
   rollerTtl?: number;
   diggerDuration?: number;
+  sandhogDuration?: number;
   funkyChildCount?: number;
   napalmDrops?: number;
   napalmTtl?: number;
@@ -27,14 +28,19 @@ const WEAPON_RUNTIME_SPECS: Record<string, WeaponRuntimeSpec> = {
   'baby-nuke': { id: 'baby-nuke', launchProjectileType: 'ballistic', impactMode: 'default' },
   nuke: { id: 'nuke', launchProjectileType: 'ballistic', impactMode: 'default' },
   'sand-bomb': { id: 'sand-bomb', launchProjectileType: 'ballistic', impactMode: 'sand' },
+  'ton-of-dirt': { id: 'ton-of-dirt', launchProjectileType: 'ballistic', impactMode: 'dirt' },
+  'liquid-dirt': { id: 'liquid-dirt', launchProjectileType: 'ballistic', impactMode: 'liquid' },
 
   'baby-roller': { id: 'baby-roller', launchProjectileType: 'ballistic', impactMode: 'roller', rollerTtl: 2.7 },
   roller: { id: 'roller', launchProjectileType: 'ballistic', impactMode: 'roller', rollerTtl: 3.1 },
   'heavy-roller': { id: 'heavy-roller', launchProjectileType: 'ballistic', impactMode: 'roller', rollerTtl: 3.6 },
 
-  'baby-digger': { id: 'baby-digger', launchProjectileType: 'ballistic', impactMode: 'digger', diggerDuration: 1.3 },
-  digger: { id: 'digger', launchProjectileType: 'ballistic', impactMode: 'digger', diggerDuration: 2 },
-  'heavy-digger': { id: 'heavy-digger', launchProjectileType: 'ballistic', impactMode: 'digger', diggerDuration: 2.8 },
+  'baby-digger': { id: 'baby-digger', launchProjectileType: 'ballistic', impactMode: 'digger', diggerDuration: 0.45 },
+  digger: { id: 'digger', launchProjectileType: 'ballistic', impactMode: 'digger', diggerDuration: 0.7 },
+  'heavy-digger': { id: 'heavy-digger', launchProjectileType: 'ballistic', impactMode: 'digger', diggerDuration: 0.85 },
+  'baby-sandhog': { id: 'baby-sandhog', launchProjectileType: 'ballistic', impactMode: 'sandhog', sandhogDuration: 0.6 },
+  sandhog: { id: 'sandhog', launchProjectileType: 'ballistic', impactMode: 'sandhog', sandhogDuration: 1.05 },
+  'heavy-sandhog': { id: 'heavy-sandhog', launchProjectileType: 'ballistic', impactMode: 'sandhog', sandhogDuration: 1.9 },
 
   'funky-bomb': { id: 'funky-bomb', launchProjectileType: 'ballistic', impactMode: 'funky', funkyChildCount: 6 },
   'funky-nuke': { id: 'funky-nuke', launchProjectileType: 'ballistic', impactMode: 'funky', funkyChildCount: 10 },

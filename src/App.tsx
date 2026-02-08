@@ -10,7 +10,7 @@ import { buyWeapon, sellWeapon } from './game/Economy';
 import { STARTER_WEAPON_ID, WEAPONS, getWeaponById } from './game/WeaponCatalog';
 import { FIXED_DT, spreadAngles, stepProjectile, toVelocity } from './engine/physics/Ballistics';
 import { applyRoundEnd, initMatch, nextActivePlayer, updatePlayer } from './game/MatchController';
-import { addDirt, carveCrater, settleTerrain } from './engine/terrain/TerrainDeform';
+import { addDirt, addDirtDisk, addLiquidDirt, carveCrater, settleTerrain } from './engine/terrain/TerrainDeform';
 import { computeAIShot } from './engine/ai/AimAI';
 import { generateTerrain } from './engine/terrain/TerrainGenerator';
 import { pickRandomMtn, preloadMtnTerrains } from './engine/terrain/MtnTerrain';
@@ -30,22 +30,45 @@ interface RuntimeState {
     life: number;
     maxLife?: number;
     color?: string;
-    kind?: 'burst' | 'simple' | 'fire' | 'laser' | 'sand' | 'funky' | 'nuke';
+    kind?: 'burst' | 'simple' | 'fire' | 'laser' | 'sand' | 'funky' | 'nuke' | 'mirv' | 'funky-side' | 'fuel-pool';
     beamHeight?: number;
     seed?: number;
+    paused?: boolean;
+    tag?: string;
   }[];
   trails: { x1: number; y1: number; x2: number; y2: number; ownerId: string; life: number; color?: string }[];
   terrainEdits: Array<{
-    mode: 'crater' | 'tunnel' | 'addDirt';
+    mode: 'crater' | 'tunnel' | 'addDirt' | 'addDisk';
     x: number;
     y: number;
     radius: number;
     length?: number;
     amount?: number;
+    deferSettle?: boolean;
     duration: number;
     elapsed: number;
     appliedSteps: number;
   }>;
+  deferredSettlePending: boolean;
+  funkySequence: null | {
+    stage: 'collecting' | 'side-animate' | 'central';
+    expectedSides: number;
+    resolvedSides: number;
+    sideTag: string;
+    centralX: number;
+    centralY: number;
+    ownerId: string;
+    splitDepth: number;
+    effectRadius: number;
+    effectDamage: number;
+  };
+  mirvSequence: null | {
+    stage: 'collecting' | 'animating';
+    expected: number;
+    resolved: number;
+    tag: string;
+    weaponId: string;
+  };
 }
 
 function makeDefaultPlayers(): PlayerConfig[] {
@@ -59,14 +82,17 @@ function makeDefaultPlayers(): PlayerConfig[] {
   }));
 }
 
-function pickNextWeapon(player: PlayerState, delta: number): string {
-  const owned = WEAPONS.filter((w) => w.projectileCount > 0 && (player.inventory[w.id] ?? 0) > 0);
-  if (owned.length === 0) {
+function pickNextWeapon(player: PlayerState, delta: number, freeFireMode = false): string {
+  const available = freeFireMode
+    ? WEAPONS.filter((w) => w.projectileCount > 0)
+    : WEAPONS.filter((w) => w.projectileCount > 0 && (player.inventory[w.id] ?? 0) > 0);
+  if (available.length === 0) {
     return player.selectedWeaponId;
   }
-  const index = Math.max(0, owned.findIndex((w) => w.id === player.selectedWeaponId));
-  const next = (index + delta + owned.length) % owned.length;
-  return owned[next].id;
+  const selectedIndex = available.findIndex((w) => w.id === player.selectedWeaponId);
+  const index = selectedIndex >= 0 ? selectedIndex : 0;
+  const next = (index + delta + available.length) % available.length;
+  return available[next].id;
 }
 
 function isSolid(terrain: TerrainState, x: number, y: number): boolean {
@@ -80,6 +106,90 @@ function isSolid(terrain: TerrainState, x: number, y: number): boolean {
 
 function clamp(v: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, v));
+}
+
+const paletteScorchCache = new WeakMap<Array<[number, number, number]>, Uint8Array>();
+
+function luminance(rgb: [number, number, number]): number {
+  return rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722;
+}
+
+function getScorchMap(palette: Array<[number, number, number]>): Uint8Array {
+  const cached = paletteScorchCache.get(palette);
+  if (cached) {
+    return cached;
+  }
+  const out = new Uint8Array(16);
+  for (let i = 0; i < 16; i += 1) {
+    const current = palette[i] ?? palette[0] ?? [0, 0, 0];
+    const currentLum = luminance(current);
+    let best = i;
+    let bestScore = Number.POSITIVE_INFINITY;
+    for (let j = 0; j < Math.min(16, palette.length); j += 1) {
+      const candidate = palette[j];
+      if (!candidate) {
+        continue;
+      }
+      const lum = luminance(candidate);
+      if (lum >= currentLum * 0.92) {
+        continue;
+      }
+      const score = Math.abs(lum - currentLum * 0.65);
+      if (score < bestScore) {
+        bestScore = score;
+        best = j;
+      }
+    }
+    out[i] = best;
+  }
+  paletteScorchCache.set(palette, out);
+  return out;
+}
+
+function scorchTerrain(
+  terrain: TerrainState,
+  cx: number,
+  cy: number,
+  radius: number,
+  strength = 1,
+): TerrainState {
+  if (!terrain.colorIndices || !terrain.colorPalette || terrain.colorPalette.length === 0) {
+    return terrain;
+  }
+  const colorIndices = new Uint8Array(terrain.colorIndices);
+  const scorchMap = getScorchMap(terrain.colorPalette);
+  const r2 = radius * radius;
+  const minX = Math.max(0, Math.floor(cx - radius));
+  const maxX = Math.min(terrain.width - 1, Math.ceil(cx + radius));
+  const minY = Math.max(0, Math.floor(cy - radius));
+  const maxY = Math.min(terrain.height - 1, Math.ceil(cy + radius));
+
+  for (let y = minY; y <= maxY; y += 1) {
+    for (let x = minX; x <= maxX; x += 1) {
+      const dx = x - cx;
+      const dy = y - cy;
+      const d2 = dx * dx + dy * dy;
+      if (d2 > r2) {
+        continue;
+      }
+      const idx = y * terrain.width + x;
+      if (terrain.mask[idx] !== 1) {
+        continue;
+      }
+      const influence = 1 - d2 / Math.max(1, r2);
+      if (Math.random() > influence * 0.9 * strength) {
+        continue;
+      }
+      const current = colorIndices[idx] & 0x0f;
+      colorIndices[idx] = scorchMap[current];
+    }
+  }
+
+  return {
+    ...terrain,
+    revision: terrain.revision + 1,
+    colorIndices,
+  };
 }
 
 function effectiveBlastRadius(weaponId: string, baseRadius: number): number {
@@ -96,11 +206,25 @@ function normalizeSettings(input: GameSettings): GameSettings {
     roundsToWin: clamp(Number.isFinite(input.roundsToWin) ? input.roundsToWin : DEFAULT_SETTINGS.roundsToWin, 1, 9),
     cashStart: clamp(Number.isFinite(input.cashStart) ? input.cashStart : DEFAULT_SETTINGS.cashStart, 0, 500000),
     powerAdjustHz: clamp(Number.isFinite(input.powerAdjustHz) ? input.powerAdjustHz : DEFAULT_SETTINGS.powerAdjustHz, 2, 40),
+    freeFireMode: Boolean(input.freeFireMode),
+    tankColorTrails: input.tankColorTrails !== false,
+    shotTraces: Boolean(input.shotTraces),
   };
 }
 
 function maxPowerForHp(hp: number): number {
-  return clamp(Math.round(200 + hp * 8), 200, 1000);
+  return clamp(Math.round(hp * 10), 0, 1000);
+}
+
+function boostShield(player: PlayerState, shieldId: 'shield' | 'medium-shield' | 'heavy-shield'): PlayerState {
+  const item = SHIELD_ITEMS.find((entry) => entry.id === shieldId);
+  if (!item) {
+    return player;
+  }
+  return {
+    ...player,
+    shield: clamp(player.shield + item.boost, 0, 1000),
+  };
 }
 
 function pushFx(
@@ -242,6 +366,19 @@ function emitWeaponImpactFx(
     return;
   }
 
+  if (weaponId === 'mirv' || weaponId === 'death-head') {
+    pushFx(runtime, nextFxId, {
+      x,
+      y,
+      radius: weaponId === 'death-head' ? Math.max(34, radius * 0.9) : Math.max(28, radius * 0.82),
+      life: weaponId === 'death-head' ? 0.52 : 0.46,
+      maxLife: weaponId === 'death-head' ? 0.52 : 0.46,
+      kind: 'mirv',
+      seed: Math.floor(Math.random() * 1000000),
+    });
+    return;
+  }
+
   const simple = weaponId === 'missile';
   const nukeLike = weaponId === 'baby-nuke' || weaponId === 'nuke';
   pushFx(runtime, nextFxId, {
@@ -257,7 +394,8 @@ function emitWeaponImpactFx(
 }
 
 function spawnMirvChildren(parent: ProjectileState, count: number): ProjectileState[] {
-  const offset = 5;
+  const offset = parent.weaponId === 'death-head' ? 8.5 : 6.5;
+  const colors = ['#d9ff5a', '#9eff4b', '#74ff61', '#89ffbe', '#83ffd8', '#b2ff6f'];
   let speed = parent.vx - (offset * count) / 2;
   const out: ProjectileState[] = [];
   for (let i = 0; i < count; i += 1) {
@@ -265,12 +403,13 @@ function spawnMirvChildren(parent: ProjectileState, count: number): ProjectileSt
       x: parent.x,
       y: parent.y,
       vx: speed,
-      vy: 10,
+      vy: -74 + Math.random() * 14 - i * 0.7,
       ownerId: parent.ownerId,
       weaponId: parent.weaponId,
-      ttl: 5.2,
+      ttl: 5.6,
       projectileType: 'mirv-child',
       splitDepth: (parent.splitDepth ?? 0) + 1,
+      color: colors[i % colors.length],
     });
     speed += offset;
   }
@@ -311,7 +450,15 @@ export default function App(): JSX.Element {
   const [winnerName, setWinnerName] = useState('');
   const [shieldMenuOpen, setShieldMenuOpen] = useState(false);
 
-  const runtimeRef = useRef<RuntimeState>({ projectiles: [], explosions: [], trails: [], terrainEdits: [] });
+  const runtimeRef = useRef<RuntimeState>({
+    projectiles: [],
+    explosions: [],
+    trails: [],
+    terrainEdits: [],
+    deferredSettlePending: false,
+    funkySequence: null,
+    mirvSequence: null,
+  });
   const aiFireTimeout = useRef<number | null>(null);
   const matchRef = useRef<MatchState | null>(null);
   const terrainRef = useRef<TerrainState | null>(null);
@@ -519,8 +666,11 @@ export default function App(): JSX.Element {
   const fireWeapon = useCallback((sourceMatch: MatchState, shooter: PlayerState) => {
     const weapon = getWeaponById(shooter.selectedWeaponId);
     const ammo = shooter.inventory[weapon.id] ?? 0;
-    if (ammo <= 0) {
-      const fallbackToBaby = (shooter.inventory[STARTER_WEAPON_ID] ?? 0) > 0 ? STARTER_WEAPON_ID : pickNextWeapon(shooter, 1);
+    const unlimitedAmmo = sourceMatch.settings.freeFireMode;
+    if (!unlimitedAmmo && ammo <= 0) {
+      const fallbackToBaby = (shooter.inventory[STARTER_WEAPON_ID] ?? 0) > 0
+        ? STARTER_WEAPON_ID
+        : pickNextWeapon(shooter, 1, sourceMatch.settings.freeFireMode);
       if (fallbackToBaby !== shooter.selectedWeaponId) {
         const updatedShooter = { ...shooter, selectedWeaponId: fallbackToBaby };
         const updatedMatch = updatePlayer(sourceMatch, updatedShooter);
@@ -530,8 +680,8 @@ export default function App(): JSX.Element {
       setMessage(`${shooter.config.name} is out of ${weapon.name}`);
       return;
     }
-    const consumedInventory = { ...shooter.inventory, [weapon.id]: Math.max(0, ammo - 1) };
-    const weaponDepleted = consumedInventory[weapon.id] <= 0;
+    const consumedInventory = unlimitedAmmo ? shooter.inventory : { ...shooter.inventory, [weapon.id]: Math.max(0, ammo - 1) };
+    const weaponDepleted = !unlimitedAmmo && consumedInventory[weapon.id] <= 0;
     const nextSelectedWeaponId =
       weaponDepleted && (consumedInventory[STARTER_WEAPON_ID] ?? 0) > 0 ? STARTER_WEAPON_ID : shooter.selectedWeaponId;
     const armedShooter = { ...shooter, inventory: consumedInventory, selectedWeaponId: nextSelectedWeaponId };
@@ -562,6 +712,12 @@ export default function App(): JSX.Element {
     const weaponSpec = getWeaponRuntimeSpec(weapon.id);
     for (const angle of angles) {
       const { vx, vy } = toVelocity(angle, armedShooter.power);
+      const projectileType = weaponSpec.launchProjectileType;
+      const color =
+        (weapon.id === 'ton-of-dirt' || weapon.id === 'liquid-dirt') ? '#ff5b5b' :
+        projectileType === 'mirv-carrier' ? '#ffe95a' :
+        projectileType === 'mirv-child' ? '#8cff5a' :
+        undefined;
       runtimeRef.current.projectiles.push({
         x: armedShooter.x,
         y: armedShooter.y - 4,
@@ -571,7 +727,8 @@ export default function App(): JSX.Element {
         weaponId: weapon.id,
         ttl: 9,
         splitDepth: 0,
-        projectileType: weaponSpec.launchProjectileType,
+        projectileType,
+        color,
       });
     }
 
@@ -634,7 +791,7 @@ export default function App(): JSX.Element {
       angleTickAccumulatorRef.current = 0;
     }
     if (typeof input.powerSet === 'number') {
-      const setPower = clamp(input.powerSet, 200, active.maxPower);
+      const setPower = clamp(input.powerSet, 0, active.maxPower);
       if (
         setPower === active.power &&
         updatedAngle === active.angle &&
@@ -665,7 +822,7 @@ export default function App(): JSX.Element {
     if (powerDirection !== 0) {
       powerTickAccumulatorRef.current += deltaSeconds * currentMatch.settings.powerAdjustHz;
       while (powerTickAccumulatorRef.current >= 1) {
-        updatedPower = clamp(updatedPower + powerDirection * powerStep, 200, active.maxPower);
+        updatedPower = clamp(updatedPower + powerDirection * powerStep, 0, active.maxPower);
         powerTickAccumulatorRef.current -= 1;
       }
     } else {
@@ -709,7 +866,9 @@ export default function App(): JSX.Element {
         }
         const x = clamp(Math.floor(player.x), 0, terrainState.width - 1);
         const groundY = terrainState.heights[x] - 4;
-        if (Math.abs(player.y - groundY) < 0.5) {
+        // Only snap tanks downward (gravity/fall). Do not push them upward when dirt is added,
+        // so ton/liquid dirt can bury a tank instead of lifting it.
+        if (player.y >= groundY - 0.5) {
           return player;
         }
         return {
@@ -721,13 +880,14 @@ export default function App(): JSX.Element {
     });
 
     const enqueueTerrainEdit = (
-      mode: 'crater' | 'tunnel' | 'addDirt',
+      mode: 'crater' | 'tunnel' | 'addDirt' | 'addDisk',
       x: number,
       y: number,
       radius: number,
       duration: number,
       length?: number,
       amount?: number,
+      deferSettle = false,
     ): void => {
       runtime.terrainEdits.push({
         mode,
@@ -736,6 +896,7 @@ export default function App(): JSX.Element {
         radius,
         length,
         amount,
+        deferSettle,
         duration,
         elapsed: 0,
         appliedSteps: 0,
@@ -744,6 +905,7 @@ export default function App(): JSX.Element {
 
     if (runtime.terrainEdits.length > 0) {
       const nextEdits: RuntimeState['terrainEdits'] = [];
+      let touchedDeferredSettle = false;
       for (const edit of runtime.terrainEdits) {
         const elapsed = edit.elapsed + FIXED_DT;
         const duration = Math.max(0.05, edit.duration);
@@ -758,10 +920,23 @@ export default function App(): JSX.Element {
             const r = Math.max(1, (edit.radius * stepN) / totalSteps);
             nextTerrain = carveCrater(nextTerrain, edit.x, edit.y, r, false);
             terrainNeedsSettle = true;
+            if (edit.deferSettle) {
+              touchedDeferredSettle = true;
+            }
           } else if (edit.mode === 'addDirt') {
             const amt = Math.max(1, Math.round((edit.amount ?? 1) / totalSteps));
             nextTerrain = addDirt(nextTerrain, edit.x, edit.y, edit.radius, amt, false);
             terrainNeedsSettle = true;
+            if (edit.deferSettle) {
+              touchedDeferredSettle = true;
+            }
+          } else if (edit.mode === 'addDisk') {
+            const r = Math.max(1, (edit.radius * stepN) / totalSteps);
+            nextTerrain = addDirtDisk(nextTerrain, edit.x, edit.y, r, false);
+            terrainNeedsSettle = true;
+            if (edit.deferSettle) {
+              touchedDeferredSettle = true;
+            }
           } else {
             const len = Math.max(1, edit.length ?? 1);
             const seg = Math.floor((len * stepN) / totalSteps);
@@ -769,6 +944,9 @@ export default function App(): JSX.Element {
             for (let i = prevSeg; i < seg; i += 1) {
               nextTerrain = carveCrater(nextTerrain, edit.x, edit.y + i * 2, edit.radius, false);
               terrainNeedsSettle = true;
+              if (edit.deferSettle) {
+                touchedDeferredSettle = true;
+              }
             }
           }
           appliedSteps += 1;
@@ -779,19 +957,36 @@ export default function App(): JSX.Element {
         }
       }
       runtime.terrainEdits = nextEdits;
+      if (touchedDeferredSettle) {
+        runtime.deferredSettlePending = true;
+      }
       if (runtime.terrainEdits.length === 0 && terrainNeedsSettle) {
-        nextTerrain = settleTerrain(nextTerrain);
+        const hasActiveDeferredTerrainProjectile = runtime.projectiles.some(
+          (p) => p.projectileType === 'digger' || p.projectileType === 'sandhog' || p.projectileType === 'mirv-child',
+        );
+        const waitingClusterSequence = Boolean(runtime.funkySequence || runtime.mirvSequence);
+        const hasActiveNukeExplosion = runtime.explosions.some((e) => e.kind === 'nuke');
+        if (runtime.deferredSettlePending) {
+          if (!hasActiveDeferredTerrainProjectile && !waitingClusterSequence && !hasActiveNukeExplosion) {
+            nextTerrain = settleTerrain(nextTerrain);
+            runtime.deferredSettlePending = false;
+          }
+        } else {
+          nextTerrain = settleTerrain(nextTerrain);
+        }
       }
 
       nextMatch = groundPlayersToTerrain(nextMatch, nextTerrain);
 
       runtime.explosions = runtime.explosions
-        .map((e) => ({ ...e, maxLife: e.maxLife ?? e.life, life: e.life - FIXED_DT }))
+        .map((e) => (e.paused ? { ...e, maxLife: e.maxLife ?? e.life } : { ...e, maxLife: e.maxLife ?? e.life, life: e.life - FIXED_DT }))
         .filter((e) => e.life > 0);
-      runtime.trails = runtime.trails
-        .map((t) => ({ ...t, life: t.life - FIXED_DT * 1.6 }))
-        .filter((t) => t.life > 0)
-        .slice(-2400);
+      if (!currentMatch.settings.shotTraces) {
+        runtime.trails = runtime.trails
+          .map((t) => ({ ...t, life: t.life - FIXED_DT * 1.6 }))
+          .filter((t) => t.life > 0)
+          .slice(-2400);
+      }
 
       matchRef.current = nextMatch;
       terrainRef.current = nextTerrain;
@@ -844,7 +1039,7 @@ export default function App(): JSX.Element {
             armor: damage.nextArmor,
             hp: nextHp,
             maxPower: maxPowerForHp(nextHp),
-            power: clamp(player.power, 200, maxPowerForHp(nextHp)),
+            power: clamp(player.power, 0, maxPowerForHp(nextHp)),
             alive: nextHp > 0,
           };
         }),
@@ -877,6 +1072,14 @@ export default function App(): JSX.Element {
             (projectile.effectDamage ?? 7) * 10,
             projectile.splitDepth ?? 0,
           );
+          const isHotNapalm = projectile.weaponId === 'hot-napalm';
+          nextTerrain = scorchTerrain(
+            nextTerrain,
+            projectile.x,
+            projectile.y + 1,
+            isHotNapalm ? 8 : 6,
+            isHotNapalm ? 1.25 : 1,
+          );
           timer -= 0.18;
         }
         if (Math.random() > 0.3) {
@@ -896,53 +1099,253 @@ export default function App(): JSX.Element {
       }
 
       if (projectile.projectileType === 'digger') {
-        let dx = 0;
-        let dy = 0;
         let x = projectile.x;
         let y = projectile.y;
-        for (let i = 0; i < 6; i += 1) {
-          const r = Math.random();
-          if (r < 0.46) dy = 1;
-          else if (r < 0.62) dy = -1;
-          else dx = r < 0.81 ? -1 : 1;
-          x = clamp(x + dx, 1, nextTerrain.width - 2);
-          y = clamp(y + dy, 1, nextTerrain.height - 2);
-          enqueueTerrainEdit('crater', x, y, 1.5, 0.05);
+        let dirX = projectile.vx;
+        let dirY = projectile.vy;
+        const tier =
+          projectile.weaponId === 'heavy-digger' ? 'heavy' :
+          projectile.weaponId === 'baby-digger' ? 'baby' : 'normal';
+        const coreRadius = tier === 'heavy' ? 3.1 : tier === 'baby' ? 1.5 : 2.35;
+        const sideRadius = tier === 'heavy' ? 2.2 : tier === 'baby' ? 1.1 : 1.65;
+        const lateralStep = tier === 'heavy' ? 7 : tier === 'baby' ? 3 : 6;
+        const lateralAltStep = tier === 'heavy' ? 5 : tier === 'baby' ? 2 : 4;
+        const verticalStep = tier === 'heavy' ? 1 : tier === 'baby' ? 1 : 2;
+        const loopSteps = tier === 'heavy' ? 9 : tier === 'baby' ? 4 : 7;
+        const jitterX = tier === 'heavy' ? 0.2 : tier === 'baby' ? 0.42 : 0.3;
+        const jitterY = tier === 'heavy' ? 0.1 : tier === 'baby' ? 0.24 : 0.18;
+        if (Math.abs(dirX) + Math.abs(dirY) < 0.001) {
+          const seed = projectile.seed ?? 0;
+          const a = (seed * 0.73) % (Math.PI * 2);
+          dirX = Math.cos(a) * 1.2;
+          dirY = Math.sin(a) * 0.25;
+        }
+        const sideSign = dirX >= 0 ? 1 : -1;
+        const maxDownFromHorizontal = (tier === 'heavy' ? 0.95 : 1.08);
+        const sampleDownwardSector = (sign: number): number => (
+          sign >= 0
+            ? Math.random() * maxDownFromHorizontal
+            : Math.PI - Math.random() * maxDownFromHorizontal
+        );
+
+        for (let i = 0; i < loopSteps; i += 1) {
+          // Randomize heading inside the side-specific downward sector (horizontal -> straight down).
+          const targetA = sampleDownwardSector(sideSign);
+          const targetX = Math.cos(targetA);
+          const targetY = Math.sin(targetA);
+          const blend = Math.random() < 0.55 ? 0.7 : 0.5;
+          dirX = dirX * blend + targetX * (1.25 - blend) + (Math.random() * 2 - 1) * jitterX;
+          dirY = dirY * blend + targetY * (1.25 - blend) + (Math.random() * 2 - 1) * jitterY;
+          if (dirY < 0) {
+            dirY *= -0.35;
+          }
+          const deepThreshold = nextTerrain.height * 0.7;
+          if (y > deepThreshold) {
+            dirY *= 0.35;
+            dirY -= 0.12 + Math.random() * 0.18;
+          }
+          const mag = Math.max(0.001, Math.hypot(dirX, dirY));
+          const speed = Math.random() < 0.6 ? lateralStep : lateralAltStep;
+          let stepX = Math.round((dirX / mag) * speed);
+          let stepY = Math.round((dirY / mag) * speed);
+          const minDown = tier === 'heavy' ? 1 : 0;
+          if (stepY < minDown) {
+            stepY = minDown;
+          }
+          stepY += Math.random() < 0.16 ? verticalStep : 0;
+          if (stepX === 0 && stepY === 0) {
+            stepX = sideSign;
+          }
+          x = clamp(x + stepX, 1, nextTerrain.width - 2);
+          y = clamp(y + stepY, 1, nextTerrain.height - 2);
+          nextTerrain = carveCrater(nextTerrain, x, y, coreRadius, false);
+          terrainNeedsSettle = true;
+          runtime.deferredSettlePending = true;
+          if (i % 2 === 0) {
+            nextTerrain = carveCrater(nextTerrain, clamp(x + Math.sign(stepX), 1, nextTerrain.width - 2), y, sideRadius, false);
+            terrainNeedsSettle = true;
+          }
           runtime.trails.push({
             x1: x,
             y1: y,
             x2: x + (Math.random() * 2 - 1),
             y2: y + (Math.random() * 2 - 1),
             ownerId: projectile.ownerId,
-            life: 0.22,
+            life: tier === 'heavy' ? 0.16 : tier === 'baby' ? 0.1 : 0.14,
             color: '#d8c38d',
           });
-          dx = 0;
-          dy = 0;
+        }
+        const nextTtl = projectile.ttl - FIXED_DT;
+        const runawayDepthCutoff = nextTerrain.height * 0.86;
+        if (nextTtl > 0 && y < runawayDepthCutoff) {
+          survivors.push({ ...projectile, x, y, vx: dirX, vy: dirY, ttl: nextTtl });
+        }
+        continue;
+      }
+
+      if (projectile.projectileType === 'sandhog') {
+        let x = projectile.x;
+        let y = projectile.y;
+        let dirX = projectile.vx;
+        let dirY = projectile.vy;
+        let segmentStepsLeft = projectile.state ?? 0;
+        const hogTier =
+          projectile.weaponId === 'heavy-sandhog' ? 'heavy' :
+          projectile.weaponId === 'baby-sandhog' ? 'baby' : 'normal';
+        const loopCount = hogTier === 'heavy' ? 12 : hogTier === 'baby' ? 8 : 10;
+        const stepFast = hogTier === 'heavy' ? 7 : hogTier === 'baby' ? 4 : 6;
+        const stepSlow = hogTier === 'heavy' ? 5 : hogTier === 'baby' ? 3 : 4;
+        const coreRadius = hogTier === 'heavy' ? 2.2 : hogTier === 'baby' ? 1.55 : 1.9;
+        const sideBlastRadius = hogTier === 'heavy' ? 5.2 : hogTier === 'baby' ? 3.8 : 4.6;
+        if (Math.abs(dirX) + Math.abs(dirY) < 0.001) {
+          dirX = Math.random() < 0.5 ? -1 : 1;
+          dirY = 0.35;
+        }
+
+        const findSolidNear = (sx: number, sy: number): { x: number; y: number } | null => {
+          const baseX = clamp(Math.round(sx), 1, nextTerrain.width - 2);
+          const baseY = clamp(Math.round(sy), 1, nextTerrain.height - 2);
+          if (isSolid(nextTerrain, baseX, baseY)) {
+            return { x: baseX, y: baseY };
+          }
+          for (let dy = 1; dy <= 14; dy += 1) {
+            const yy = clamp(baseY + dy, 1, nextTerrain.height - 2);
+            if (isSolid(nextTerrain, baseX, yy)) {
+              return { x: baseX, y: yy };
+            }
+            for (let dx = 1; dx <= 5; dx += 1) {
+              const xl = clamp(baseX - dx, 1, nextTerrain.width - 2);
+              const xr = clamp(baseX + dx, 1, nextTerrain.width - 2);
+              if (isSolid(nextTerrain, xl, yy)) {
+                return { x: xl, y: yy };
+              }
+              if (isSolid(nextTerrain, xr, yy)) {
+                return { x: xr, y: yy };
+              }
+            }
+          }
+          return null;
+        };
+
+        for (let i = 0; i < loopCount; i += 1) {
+          // Keep straight segments for a while, then turn sharply for boxy/angular tunnels.
+          if (segmentStepsLeft <= 0) {
+            const turn = Math.random();
+            const angle = Math.atan2(dirY, dirX);
+            let nextAngle = angle;
+            if (turn < 0.45) {
+              nextAngle = angle + (Math.random() < 0.5 ? 1 : -1) * (Math.PI / 4);
+            } else if (turn < 0.78) {
+              nextAngle = angle + (Math.random() < 0.5 ? 1 : -1) * (Math.PI / 2);
+            } else if (turn < 0.9) {
+              nextAngle = angle + (Math.random() < 0.5 ? 1 : -1) * ((3 * Math.PI) / 4);
+            }
+            dirX = Math.cos(nextAngle);
+            dirY = Math.sin(nextAngle);
+            segmentStepsLeft = 7 + Math.floor(Math.random() * 10);
+          }
+
+          const mag = Math.max(0.001, Math.hypot(dirX, dirY));
+          const stepX = Math.round((dirX / mag) * (Math.random() < 0.68 ? stepFast : stepSlow));
+          const stepY = Math.round((dirY / mag) * (Math.random() < 0.62 ? stepFast - 1 : stepSlow));
+          const candidateX = clamp(x + stepX, 1, nextTerrain.width - 2);
+          const candidateY = clamp(y + stepY, 1, nextTerrain.height - 2);
+          const solidPoint = findSolidNear(candidateX, candidateY);
+          if (!solidPoint) {
+            dirY = Math.abs(dirY) + 0.35;
+            segmentStepsLeft = 0;
+            continue;
+          }
+          x = solidPoint.x;
+          y = solidPoint.y;
+
+          // Core tunnel with immediate carving (faster and lower overhead than queued micro-edits).
+          nextTerrain = carveCrater(nextTerrain, x, y, coreRadius, false);
+          terrainNeedsSettle = true;
+          runtime.deferredSettlePending = true;
+
+          if (i % 2 === 0) {
+            const nMag = Math.max(0.001, Math.hypot(stepX, stepY));
+            const nx = -stepY / nMag;
+            const ny = stepX / nMag;
+            const side = Math.random() < 0.5 ? -1 : 1;
+            const crackLen = 6 + Math.floor(Math.random() * (hogTier === 'heavy' ? 5 : 4));
+            for (let k = 1; k <= crackLen; k += 1) {
+              const cx = clamp(Math.round(x + nx * side * k), 1, nextTerrain.width - 2);
+              const cy = clamp(Math.round(y + ny * side * k), 1, nextTerrain.height - 2);
+              if (isSolid(nextTerrain, cx, cy)) {
+                nextTerrain = carveCrater(nextTerrain, cx, cy, hogTier === 'baby' ? 1.2 : 1.5, false);
+                terrainNeedsSettle = true;
+              }
+            }
+          }
+
+          if (i % 3 === 0 && Math.random() < 0.72) {
+            nextTerrain = carveCrater(nextTerrain, x, y, sideBlastRadius, false);
+            terrainNeedsSettle = true;
+            pushFx(runtime, () => nextFxIdRef.current++, {
+              x: x + (Math.random() * 2 - 1) * 2,
+              y: y + (Math.random() * 2 - 1) * 2,
+              radius: 4,
+              life: 0.1,
+              maxLife: 0.1,
+              kind: 'simple',
+              color: '#e6c47a',
+            });
+          }
+          if (i % 2 === 0) {
+            runtime.trails.push({
+              x1: x,
+              y1: y,
+              x2: x + (Math.random() * 2 - 1),
+              y2: y + (Math.random() * 2 - 1),
+              ownerId: projectile.ownerId,
+              life: 0.16,
+              color: '#f0cf87',
+            });
+          }
+          segmentStepsLeft -= 1;
+
+          // Bounce off borders to keep tunneling through the map.
+          if (x <= 2 || x >= nextTerrain.width - 3) {
+            dirX *= -1;
+            segmentStepsLeft = Math.min(segmentStepsLeft, 2);
+          }
+          if (y <= 2) {
+            dirY = Math.abs(dirY) + 0.35;
+            segmentStepsLeft = Math.min(segmentStepsLeft, 1);
+          } else if (y >= nextTerrain.height - 3) {
+            dirY = -Math.abs(dirY);
+            segmentStepsLeft = Math.min(segmentStepsLeft, 2);
+          }
         }
         const nextTtl = projectile.ttl - FIXED_DT;
         if (nextTtl > 0) {
-          survivors.push({ ...projectile, x, y, ttl: nextTtl });
+          survivors.push({ ...projectile, x, y, vx: dirX, vy: dirY, state: segmentStepsLeft, ttl: nextTtl });
         }
         continue;
       }
 
       if (projectile.projectileType === 'roller') {
         let dir = projectile.direction ?? (projectile.vx >= 0 ? 1 : -1);
-        let bounceCount = projectile.state ?? 0;
-        let x = clamp(Math.round(projectile.x + dir), 2, nextTerrain.width - 3);
-        let y = nextTerrain.heights[x] - 3;
-        const probeX = clamp(Math.round(x + dir), 2, nextTerrain.width - 3);
-        const probeY = nextTerrain.heights[probeX] - 3;
-        let stable = Math.abs(probeY - y) <= 5;
-        if (!stable) {
-          if (bounceCount < 2) {
-            dir *= -1;
-            bounceCount += 1;
-            const retryX = clamp(Math.round(x + dir), 2, nextTerrain.width - 3);
-            const retryY = nextTerrain.heights[retryX] - 3;
-            stable = Math.abs(retryY - y) <= 5;
-          }
+        const currentX = clamp(Math.round(projectile.x), 2, nextTerrain.width - 3);
+        const currentY = nextTerrain.heights[currentX] - 3;
+        let x = currentX;
+        let y = currentY;
+        let stable = false;
+
+        const tryRollDirection = (fromX: number, fromY: number, tryDir: number): { ok: boolean; x: number; y: number } => {
+          const stepX = clamp(Math.round(fromX + tryDir), 2, nextTerrain.width - 3);
+          const stepY = nextTerrain.heights[stepX] - 3;
+          const downhillOrFlat = stepY >= fromY - 0.2;
+          return { ok: downhillOrFlat, x: stepX, y: stepY };
+        };
+
+        const primary = tryRollDirection(currentX, currentY, dir);
+        if (primary.ok) {
+          x = primary.x;
+          y = primary.y;
+          stable = true;
         }
         const hitPlayer = nextMatch.players.find(
           (player) =>
@@ -969,7 +1372,7 @@ export default function App(): JSX.Element {
           enqueueTerrainEdit('crater', x, y, weapon.blastRadius, 0.35);
           applyDamageAt(x, y, weapon.blastRadius, weapon.damage * 10, projectile.splitDepth ?? 0);
         } else {
-          survivors.push({ ...projectile, x, y, direction: dir, state: bounceCount, ttl: nextTtl });
+          survivors.push({ ...projectile, x, y, direction: dir, ttl: nextTtl });
         }
         continue;
       }
@@ -995,17 +1398,36 @@ export default function App(): JSX.Element {
 
         if (p.projectileType === 'mirv-carrier' && before.vy < 0 && p.vy >= 0) {
           const spec = getWeaponRuntimeSpec(p.weaponId);
+          const expected = spec.mirvChildCount ?? 5;
+          runtime.mirvSequence = {
+            stage: 'collecting',
+            expected,
+            resolved: 0,
+            tag: `mirv-${nextFxIdRef.current++}`,
+            weaponId: p.weaponId,
+          };
+          runtime.deferredSettlePending = true;
           spawnedProjectiles.push(...spawnMirvChildren(p, spec.mirvChildCount ?? 5));
           collided = true;
           break;
         }
 
-        if (p.x < 0 || p.x >= currentTerrain.width || p.y < 0 || p.y >= currentTerrain.height) {
-          collided = true;
-          break;
+        const skyOverflowLimit = currentTerrain.height * 0.5;
+        const outOfBounds = p.x < 0
+          || p.x >= currentTerrain.width
+          || p.y < -skyOverflowLimit
+          || p.y >= currentTerrain.height;
+        let forcedBoundaryImpact = false;
+        if (outOfBounds) {
+          p = {
+            ...p,
+            x: clamp(p.x, 0, currentTerrain.width - 1),
+            y: clamp(p.y, 0, currentTerrain.height - 1),
+          };
+          forcedBoundaryImpact = true;
         }
 
-        const hitTerrain = isSolid(nextTerrain, p.x, p.y);
+        const hitTerrain = forcedBoundaryImpact || isSolid(nextTerrain, p.x, p.y);
         const hitPlayer = nextMatch.players.find(
           (player) =>
             player.alive &&
@@ -1024,6 +1446,15 @@ export default function App(): JSX.Element {
         const weaponSpec = getWeaponRuntimeSpec(weapon.id);
 
         if (weaponSpec.impactMode === 'mirv' && p.projectileType === 'mirv-carrier') {
+          const expected = weaponSpec.mirvChildCount ?? 5;
+          runtime.mirvSequence = {
+            stage: 'collecting',
+            expected,
+            resolved: 0,
+            tag: `mirv-${nextFxIdRef.current++}`,
+            weaponId: weapon.id,
+          };
+          runtime.deferredSettlePending = true;
           spawnedProjectiles.push(...spawnMirvChildren({ ...p, x: impactX, y: impactY }, weaponSpec.mirvChildCount ?? 5));
           collided = true;
           break;
@@ -1058,15 +1489,19 @@ export default function App(): JSX.Element {
 
         if (weaponSpec.impactMode === 'digger') {
           const duration = weaponSpec.diggerDuration ?? 2;
-          for (let i = 0; i < 10; i += 1) {
+          const diggerCount =
+            weapon.id === 'baby-digger' ? 2 :
+            weapon.id === 'heavy-digger' ? 4 : 3;
+          for (let i = 0; i < diggerCount; i += 1) {
+            const spread = (i - (diggerCount - 1) / 2) * 0.18;
             spawnedProjectiles.push({
               x: impactX,
               y: impactY,
-              vx: 0,
-              vy: 0,
+              vx: p.vx * (0.9 + i * 0.08) + spread * 18,
+              vy: p.vy * (0.34 + i * 0.035) + Math.abs(spread) * 7,
               ownerId: p.ownerId,
               weaponId: weapon.id,
-              ttl: duration,
+              ttl: duration * (0.8 + (i + 1) / (diggerCount + 1) * 0.65),
               projectileType: 'digger',
               seed: i,
             });
@@ -1084,23 +1519,57 @@ export default function App(): JSX.Element {
           break;
         }
 
-        if (weaponSpec.impactMode === 'funky' && (p.splitDepth ?? 0) === 0) {
-          const count = weaponSpec.funkyChildCount ?? 6;
-          spawnedProjectiles.push(...spawnFunkyChildren({ ...p, x: impactX, y: impactY }, count));
+        if (weaponSpec.impactMode === 'sandhog') {
+          const duration = weaponSpec.sandhogDuration ?? 1.5;
           spawnedProjectiles.push({
             x: impactX,
             y: impactY,
-            vx: 0,
-            vy: 0,
+            vx: p.vx * 1.15,
+            vy: p.vy * 0.82,
             ownerId: p.ownerId,
             weaponId: weapon.id,
-            ttl: 0.85,
-            projectileType: 'delayed-blast',
+            ttl: duration,
+            projectileType: 'sandhog',
+            seed: 1,
+          });
+          pushFx(runtime, () => nextFxIdRef.current++, {
+            x: impactX,
+            y: impactY,
+            radius: 12,
+            life: 0.2,
+            maxLife: 0.2,
+            kind: 'sand',
+            color: '#d9bc7c',
+          });
+          collided = true;
+          break;
+        }
+
+        if (weaponSpec.impactMode === 'funky' && (p.splitDepth ?? 0) === 0) {
+          const count = weaponSpec.funkyChildCount ?? 6;
+          const sideTag = `funky-side-${nextFxIdRef.current++}`;
+          spawnedProjectiles.push(...spawnFunkyChildren({ ...p, x: impactX, y: impactY }, count));
+          runtime.funkySequence = {
+            stage: 'collecting',
+            expectedSides: count,
+            resolvedSides: 0,
+            sideTag,
+            centralX: impactX,
+            centralY: impactY,
+            ownerId: p.ownerId,
+            splitDepth: p.splitDepth ?? 0,
             effectRadius: weapon.blastRadius,
             effectDamage: weapon.damage,
+          };
+          pushFx(runtime, () => nextFxIdRef.current++, {
+            x: impactX,
+            y: impactY,
+            radius: 12,
+            life: 0.18,
+            maxLife: 0.18,
+            kind: 'funky',
+            color: '#ff8d3f',
           });
-          emitWeaponImpactFx(runtime, () => nextFxIdRef.current++, weapon.id, impactX, impactY, 12, '#ff8d3f');
-          enqueueTerrainEdit('crater', impactX, impactY, 10, 0.2);
           collided = true;
           break;
         }
@@ -1112,8 +1581,57 @@ export default function App(): JSX.Element {
           break;
         }
 
+        if (weaponSpec.impactMode === 'dirt') {
+          enqueueTerrainEdit('addDisk', impactX, impactY, 112, 0.72, undefined, undefined, true);
+          pushFx(runtime, () => nextFxIdRef.current++, {
+            x: impactX,
+            y: impactY,
+            radius: 94,
+            life: 0.88,
+            maxLife: 0.88,
+            kind: 'sand',
+            color: '#d8bf86',
+          });
+          collided = true;
+          break;
+        }
+
+        if (weaponSpec.impactMode === 'liquid') {
+          nextTerrain = addLiquidDirt(nextTerrain, impactX, impactY, 140, 9000, false);
+          runtime.deferredSettlePending = true;
+          terrainNeedsSettle = true;
+          pushFx(runtime, () => nextFxIdRef.current++, {
+            x: impactX,
+            y: impactY,
+            radius: 84,
+            life: 0.78,
+            maxLife: 0.78,
+            kind: 'sand',
+            color: '#d7bb81',
+          });
+          collided = true;
+          break;
+        }
+
         if (weaponSpec.impactMode === 'napalm') {
           const drops = weaponSpec.napalmDrops ?? 12;
+          const isHotNapalm = weapon.id === 'hot-napalm';
+          const poolPatches = isHotNapalm ? 5 : 3;
+          for (let i = 0; i < poolPatches; i += 1) {
+            const px = impactX + (Math.random() * 2 - 1) * (8 + i * 10);
+            const tx = clamp(Math.round(px), 2, nextTerrain.width - 3);
+            const ty = nextTerrain.heights[tx] - 2;
+            pushFx(runtime, () => nextFxIdRef.current++, {
+              x: tx,
+              y: ty,
+              radius: isHotNapalm ? 6 + Math.random() * 3 : 4 + Math.random() * 2,
+              life: isHotNapalm ? 1.1 : 0.8,
+              maxLife: isHotNapalm ? 1.1 : 0.8,
+              kind: 'fuel-pool',
+              color: isHotNapalm ? '#ff8b2b' : '#ffae4a',
+            });
+            nextTerrain = scorchTerrain(nextTerrain, tx, ty + 1, isHotNapalm ? 15 : 11, isHotNapalm ? 1.2 : 1);
+          }
           for (let i = 0; i < drops; i += 1) {
             const a = (Math.PI * 2 * i) / drops;
             const dx = Math.cos(a) * (8 + i * 1.1);
@@ -1133,20 +1651,52 @@ export default function App(): JSX.Element {
             });
           }
           emitWeaponImpactFx(runtime, () => nextFxIdRef.current++, weapon.id, impactX, impactY, weapon.blastRadius, '#ffc933');
+          nextTerrain = scorchTerrain(nextTerrain, impactX, impactY, Math.max(10, weapon.blastRadius * 0.6), isHotNapalm ? 1.35 : 1.05);
           applyDamageAt(impactX, impactY, Math.max(12, weapon.blastRadius * 0.55), weapon.damage * 6, p.splitDepth ?? 0);
           collided = true;
           break;
         }
 
-        const blastRadius = p.projectileType === 'funky-child' ? 30 : effectiveBlastRadius(weapon.id, weapon.blastRadius);
+        const blastRadius =
+          p.projectileType === 'funky-child' ? 30 :
+          p.projectileType === 'mirv-child' ? effectiveBlastRadius(weapon.id, weapon.blastRadius) :
+          effectiveBlastRadius(weapon.id, weapon.blastRadius);
         const blastDamage = p.projectileType === 'funky-child' ? 260 : weapon.damage * 10;
 
-        if (weapon.terrainEffect === 'tunnel') {
+        if (p.projectileType === 'mirv-child') {
+          enqueueTerrainEdit('crater', impactX, impactY, blastRadius, 0.35, undefined, undefined, true);
+        } else if (weapon.terrainEffect === 'tunnel') {
           enqueueTerrainEdit('tunnel', impactX, impactY, Math.max(3, blastRadius * 0.2), 0.55, 9);
         } else if (weapon.terrainEffect === 'crater') {
-          enqueueTerrainEdit('crater', impactX, impactY, blastRadius, 0.35);
+          const deferSettleForNukeFx = weapon.id === 'baby-nuke' || weapon.id === 'nuke';
+          enqueueTerrainEdit('crater', impactX, impactY, blastRadius, 0.35, undefined, undefined, deferSettleForNukeFx);
         }
-        emitWeaponImpactFx(runtime, () => nextFxIdRef.current++, weapon.id, impactX, impactY, blastRadius, p.color);
+        if (p.projectileType === 'funky-child' && runtime.funkySequence) {
+          pushFx(runtime, () => nextFxIdRef.current++, {
+            x: impactX,
+            y: impactY,
+            radius: 28,
+            life: 0.5,
+            maxLife: 0.5,
+            kind: 'funky-side',
+            paused: runtime.funkySequence.stage === 'collecting',
+            tag: runtime.funkySequence.sideTag,
+          });
+        } else if (p.projectileType === 'mirv-child' && runtime.mirvSequence) {
+          pushFx(runtime, () => nextFxIdRef.current++, {
+            x: impactX,
+            y: impactY,
+            radius: Math.max(22, blastRadius),
+            life: weapon.id === 'death-head' ? 0.62 : 0.48,
+            maxLife: weapon.id === 'death-head' ? 0.62 : 0.48,
+            kind: 'mirv',
+            paused: runtime.mirvSequence.stage === 'collecting',
+            tag: runtime.mirvSequence.tag,
+            seed: Math.floor(Math.random() * 1000000),
+          });
+        } else {
+          emitWeaponImpactFx(runtime, () => nextFxIdRef.current++, weapon.id, impactX, impactY, blastRadius, p.color);
+        }
         applyDamageAt(impactX, impactY, blastRadius, blastDamage, p.splitDepth ?? 0);
 
         collided = true;
@@ -1155,21 +1705,140 @@ export default function App(): JSX.Element {
 
       if (!collided && p.ttl > 0) {
         survivors.push(p);
+      } else if (collided && projectile.projectileType === 'funky-child' && runtime.funkySequence) {
+        runtime.funkySequence.resolvedSides += 1;
+      } else if (!collided && p.ttl <= 0 && projectile.projectileType === 'funky-child' && runtime.funkySequence) {
+        const impactX = clamp(p.x, 0, currentTerrain.width - 1);
+        const impactY = clamp(p.y, 0, currentTerrain.height - 1);
+        const blastRadius = 30;
+        const blastDamage = 260;
+        enqueueTerrainEdit('crater', impactX, impactY, blastRadius, 0.35);
+        pushFx(runtime, () => nextFxIdRef.current++, {
+          x: impactX,
+          y: impactY,
+          radius: 28,
+          life: 0.5,
+          maxLife: 0.5,
+          kind: 'funky-side',
+          paused: runtime.funkySequence.stage === 'collecting',
+          tag: runtime.funkySequence.sideTag,
+        });
+        applyDamageAt(impactX, impactY, blastRadius, blastDamage, p.splitDepth ?? 0);
+        runtime.funkySequence.resolvedSides += 1;
+      } else if (collided && projectile.projectileType === 'mirv-child' && runtime.mirvSequence) {
+        runtime.mirvSequence.resolved += 1;
+      } else if (!collided && p.ttl <= 0 && projectile.projectileType === 'mirv-child' && runtime.mirvSequence) {
+        const impactX = clamp(p.x, 0, currentTerrain.width - 1);
+        const impactY = clamp(p.y, 0, currentTerrain.height - 1);
+        const weapon = getWeaponById(p.weaponId);
+        const blastRadius = effectiveBlastRadius(weapon.id, weapon.blastRadius);
+        enqueueTerrainEdit('crater', impactX, impactY, blastRadius, 0.35, undefined, undefined, true);
+        pushFx(runtime, () => nextFxIdRef.current++, {
+          x: impactX,
+          y: impactY,
+          radius: Math.max(22, blastRadius),
+          life: weapon.id === 'death-head' ? 0.62 : 0.48,
+          maxLife: weapon.id === 'death-head' ? 0.62 : 0.48,
+          kind: 'mirv',
+          paused: runtime.mirvSequence.stage === 'collecting',
+          tag: runtime.mirvSequence.tag,
+          seed: Math.floor(Math.random() * 1000000),
+        });
+        applyDamageAt(impactX, impactY, blastRadius, weapon.damage * 10, p.splitDepth ?? 0);
+        runtime.mirvSequence.resolved += 1;
       }
     }
 
     runtime.projectiles = [...survivors, ...spawnedProjectiles];
-    if (terrainNeedsSettle && runtime.projectiles.length === 0 && runtime.terrainEdits.length === 0) {
+    if (terrainNeedsSettle && runtime.projectiles.length === 0 && runtime.terrainEdits.length === 0 && !runtime.deferredSettlePending) {
       nextTerrain = settleTerrain(nextTerrain);
       nextMatch = groundPlayersToTerrain(nextMatch, nextTerrain);
     }
+    if (
+      runtime.deferredSettlePending
+      && runtime.projectiles.every((p) => p.projectileType !== 'digger' && p.projectileType !== 'sandhog' && p.projectileType !== 'mirv-child')
+      && !runtime.funkySequence
+      && !runtime.mirvSequence
+      && !runtime.explosions.some((e) => e.kind === 'nuke')
+      && runtime.terrainEdits.length === 0
+    ) {
+      nextTerrain = settleTerrain(nextTerrain);
+      runtime.deferredSettlePending = false;
+      nextMatch = groundPlayersToTerrain(nextMatch, nextTerrain);
+    }
     runtime.explosions = runtime.explosions
-      .map((e) => ({ ...e, maxLife: e.maxLife ?? e.life, life: e.life - FIXED_DT }))
+      .map((e) => (e.paused ? { ...e, maxLife: e.maxLife ?? e.life } : { ...e, maxLife: e.maxLife ?? e.life, life: e.life - FIXED_DT }))
       .filter((e) => e.life > 0);
-    runtime.trails = runtime.trails
-      .map((t) => ({ ...t, life: t.life - FIXED_DT * 1.6 }))
-      .filter((t) => t.life > 0)
-      .slice(-2400);
+    if (!currentMatch.settings.shotTraces) {
+      runtime.trails = runtime.trails
+        .map((t) => ({ ...t, life: t.life - FIXED_DT * 1.6 }))
+        .filter((t) => t.life > 0)
+        .slice(-2400);
+    }
+
+    if (runtime.funkySequence) {
+      if (runtime.funkySequence.stage === 'collecting') {
+        const allResolved = runtime.funkySequence.resolvedSides >= runtime.funkySequence.expectedSides;
+        if (allResolved) {
+          runtime.funkySequence.stage = 'side-animate';
+          runtime.explosions = runtime.explosions.map((e) =>
+            e.tag === runtime.funkySequence?.sideTag ? { ...e, paused: false } : e,
+          );
+        }
+      } else if (runtime.funkySequence.stage === 'side-animate') {
+        const activeSides = runtime.explosions.some((e) => e.tag === runtime.funkySequence?.sideTag && e.kind === 'funky-side');
+        if (!activeSides) {
+          const seq = runtime.funkySequence;
+          runtime.funkySequence = { ...seq, stage: 'central' };
+          const baby = getWeaponById('baby-nuke');
+          const centralRadius = effectiveBlastRadius('baby-nuke', baby.blastRadius);
+          pushFx(runtime, () => nextFxIdRef.current++, {
+            x: seq.centralX,
+            y: seq.centralY,
+            radius: centralRadius,
+            life: 1.7,
+            maxLife: 1.7,
+            kind: 'nuke',
+            seed: Math.floor(Math.random() * 1000000),
+            tag: 'funky-central',
+          });
+          enqueueTerrainEdit('crater', seq.centralX, seq.centralY, centralRadius, 0.62);
+          applyDamageAt(seq.centralX, seq.centralY, seq.effectRadius, seq.effectDamage * 10, seq.splitDepth ?? 0);
+        }
+      } else {
+        const hasCentral = runtime.explosions.some((e) => e.tag === 'funky-central');
+        if (!hasCentral) {
+          if (runtime.terrainEdits.length === 0) {
+            nextTerrain = settleTerrain(nextTerrain);
+            runtime.deferredSettlePending = false;
+            nextMatch = groundPlayersToTerrain(nextMatch, nextTerrain);
+          }
+          runtime.funkySequence = null;
+        }
+      }
+    }
+
+    if (runtime.mirvSequence) {
+      if (runtime.mirvSequence.stage === 'collecting') {
+        const allResolved = runtime.mirvSequence.resolved >= runtime.mirvSequence.expected;
+        if (allResolved) {
+          runtime.mirvSequence.stage = 'animating';
+          runtime.explosions = runtime.explosions.map((e) =>
+            e.tag === runtime.mirvSequence?.tag ? { ...e, paused: false } : e,
+          );
+        }
+      } else {
+        const activeMirvBursts = runtime.explosions.some((e) => e.tag === runtime.mirvSequence?.tag && e.kind === 'mirv');
+        if (!activeMirvBursts) {
+          if (runtime.terrainEdits.length === 0) {
+            nextTerrain = settleTerrain(nextTerrain);
+            runtime.deferredSettlePending = false;
+            nextMatch = groundPlayersToTerrain(nextMatch, nextTerrain);
+          }
+          runtime.mirvSequence = null;
+        }
+      }
+    }
 
     if (runtime.terrainEdits.length > 0) {
       matchRef.current = nextMatch;
@@ -1203,7 +1872,7 @@ export default function App(): JSX.Element {
             y: groundY,
             hp: hpAfterLanding,
             maxPower: maxPowerForHp(hpAfterLanding),
-            power: clamp(player.power, 200, maxPowerForHp(hpAfterLanding)),
+            power: clamp(player.power, 0, maxPowerForHp(hpAfterLanding)),
             alive: hpAfterLanding > 0,
             parachutes: shouldConsumeChute ? Math.max(0, player.parachutes - 1) : player.parachutes,
             fallDistance: 0,
@@ -1228,7 +1897,7 @@ export default function App(): JSX.Element {
             y: groundY,
             hp: hpAfterLanding,
             maxPower: maxPowerForHp(hpAfterLanding),
-            power: clamp(player.power, 200, maxPowerForHp(hpAfterLanding)),
+            power: clamp(player.power, 0, maxPowerForHp(hpAfterLanding)),
             alive: hpAfterLanding > 0,
             parachutes: shouldConsumeChute ? Math.max(0, player.parachutes - 1) : player.parachutes,
             fallDistance: 0,
@@ -1269,7 +1938,15 @@ export default function App(): JSX.Element {
           const regenerated = generated.terrain;
           const placed = placePlayersOnTerrain(postRound, regenerated);
           const reseated = placed.match;
-          runtimeRef.current = { projectiles: [], explosions: [], trails: [], terrainEdits: [] };
+          runtimeRef.current = {
+            projectiles: [],
+            explosions: [],
+            trails: [],
+            terrainEdits: [],
+            deferredSettlePending: false,
+            funkySequence: null,
+            mirvSequence: null,
+          };
           matchRef.current = reseated;
           terrainRef.current = placed.terrain;
           setMatch(reseated);
@@ -1290,7 +1967,7 @@ export default function App(): JSX.Element {
       return groundY - player.y > 0.75;
     });
 
-    if (runtime.projectiles.length === 0 && currentMatch.phase === 'projectile' && !hasAirbornePlayers) {
+    if (runtime.projectiles.length === 0 && currentMatch.phase === 'projectile' && !hasAirbornePlayers && !runtime.funkySequence && !runtime.mirvSequence) {
       nextMatch = nextActivePlayer({ ...nextMatch, phase: 'resolve' });
     }
 
@@ -1317,11 +1994,15 @@ export default function App(): JSX.Element {
         return;
       }
       const shot = computeAIShot(match, latestActive, terrain, latestActive.config.aiLevel);
-      const weaponId = (latestActive.inventory[shot.weaponId] ?? 0) > 0 ? shot.weaponId : pickNextWeapon(latestActive, 1);
+      const weaponId = match.settings.freeFireMode
+        ? shot.weaponId
+        : (latestActive.inventory[shot.weaponId] ?? 0) > 0
+          ? shot.weaponId
+          : pickNextWeapon(latestActive, 1, match.settings.freeFireMode);
       const tuned = {
         ...latestActive,
         angle: shot.angle,
-        power: clamp(shot.power, 200, latestActive.maxPower),
+        power: clamp(shot.power, 0, latestActive.maxPower),
         selectedWeaponId: weaponId,
       };
       const withTune = updatePlayer(match, tuned);
@@ -1360,7 +2041,7 @@ export default function App(): JSX.Element {
         }
 
         if (input.weaponCycle !== 0) {
-          const updated = { ...active, selectedWeaponId: pickNextWeapon(active, input.weaponCycle) };
+          const updated = { ...active, selectedWeaponId: pickNextWeapon(active, input.weaponCycle, liveMatch.settings.freeFireMode) };
           liveMatch = updatePlayer(liveMatch, updated);
           matchRef.current = liveMatch;
         }
@@ -1416,7 +2097,7 @@ export default function App(): JSX.Element {
         alive: true,
         hp: 100,
         maxPower: 1000,
-        power: clamp(p.power, 200, 1000),
+        power: 200,
         fuel: Math.max(0, p.inventory.fuel ?? 0),
       })),
     };
@@ -1427,7 +2108,15 @@ export default function App(): JSX.Element {
     matchRef.current = next;
     setTerrain(placed.terrain);
     setMatch(next);
-    runtimeRef.current = { projectiles: [], explosions: [], trails: [], terrainEdits: [] };
+    runtimeRef.current = {
+      projectiles: [],
+      explosions: [],
+      trails: [],
+      terrainEdits: [],
+      deferredSettlePending: false,
+      funkySequence: null,
+      mirvSequence: null,
+    };
     simulationAccumulatorRef.current = 0;
     uiSyncAccumulatorRef.current = 0;
     powerTickAccumulatorRef.current = 0;
@@ -1446,7 +2135,9 @@ export default function App(): JSX.Element {
     if (!active || active.config.kind !== 'human') {
       return;
     }
-    const updated = activateShieldFromInventory(active, shieldId);
+    const updated = liveMatch.settings.freeFireMode
+      ? boostShield(active, shieldId)
+      : activateShieldFromInventory(active, shieldId);
     if (updated === active) {
       return;
     }
@@ -1461,7 +2152,7 @@ export default function App(): JSX.Element {
   const shieldMenuItems = activeBattlePlayer
     ? SHIELD_ITEMS.map((item) => ({
       ...item,
-      count: activeBattlePlayer.inventory[item.id] ?? 0,
+      count: match?.settings.freeFireMode ? 999 : (activeBattlePlayer.inventory[item.id] ?? 0),
     }))
     : [];
 

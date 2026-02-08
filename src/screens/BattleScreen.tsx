@@ -8,10 +8,11 @@ export interface BattleRuntimeSnapshot {
   projectiles: {
     x: number;
     y: number;
+    vy: number;
     ownerId: string;
     weaponId: string;
     color?: string;
-    projectileType?: 'ballistic' | 'mirv-carrier' | 'mirv-child' | 'roller' | 'digger' | 'funky-child' | 'delayed-blast' | 'napalm-burn';
+    projectileType?: 'ballistic' | 'mirv-carrier' | 'mirv-child' | 'roller' | 'digger' | 'sandhog' | 'funky-child' | 'delayed-blast' | 'napalm-burn';
   }[];
   explosions: {
     id: number;
@@ -21,9 +22,11 @@ export interface BattleRuntimeSnapshot {
     life: number;
     maxLife?: number;
     color?: string;
-    kind?: 'burst' | 'simple' | 'fire' | 'laser' | 'sand' | 'funky' | 'nuke';
+    kind?: 'burst' | 'simple' | 'fire' | 'laser' | 'sand' | 'funky' | 'nuke' | 'mirv' | 'funky-side' | 'fuel-pool';
     beamHeight?: number;
     seed?: number;
+    paused?: boolean;
+    tag?: string;
   }[];
   trails: { x1: number; y1: number; x2: number; y2: number; ownerId: string; life: number; color?: string }[];
 }
@@ -89,6 +92,8 @@ class BattleScene extends Phaser.Scene {
   private stars: { x: number; y: number; alpha: number }[] = [];
   private seenExplosionIds = new Set<number>();
   private audioCtx: AudioContext | null = null;
+  private projectileToneOsc: OscillatorNode | null = null;
+  private projectileToneGain: GainNode | null = null;
 
   private getPowerBarRect(width: number): { x: number; y: number; w: number; h: number } {
     return { x: Math.max(300, width - 180), y: 4, w: 150, h: 10 };
@@ -161,7 +166,7 @@ class BattleScene extends Phaser.Scene {
         return;
       }
       const ratio = Phaser.Math.Clamp((pointer.x - bar.x) / bar.w, 0, 1);
-      this.pendingPowerSet = Math.round(200 + ratio * (active.maxPower - 200));
+      this.pendingPowerSet = Math.round(ratio * active.maxPower);
     });
 
     let seed = 1337;
@@ -170,6 +175,8 @@ class BattleScene extends Phaser.Scene {
       return seed / 0xffffffff;
     };
     this.stars = Array.from({ length: 460 }).map(() => ({ x: rand(), y: rand(), alpha: 0.45 + rand() * 0.55 }));
+    this.events.once('shutdown', () => this.disposeProjectileTone());
+    this.events.once('destroy', () => this.disposeProjectileTone());
   }
 
   update(_time: number, deltaMs: number): void {
@@ -217,8 +224,82 @@ class BattleScene extends Phaser.Scene {
       this.seenExplosionIds.add(exp.id);
       this.playExplosionSfx(exp.kind, exp.radius);
     }
+    this.updateProjectileWhistle(snapshot.runtime.projectiles);
 
     this.renderFrame(snapshot.match, snapshot.terrain, snapshot.runtime, snapshot.message);
+  }
+
+  private disposeProjectileTone(): void {
+    if (this.projectileToneOsc) {
+      try {
+        this.projectileToneOsc.stop();
+      } catch {
+        // ignore
+      }
+      this.projectileToneOsc.disconnect();
+      this.projectileToneOsc = null;
+    }
+    if (this.projectileToneGain) {
+      this.projectileToneGain.disconnect();
+      this.projectileToneGain = null;
+    }
+  }
+
+  private ensureProjectileWhistle(): { ctx: AudioContext; gain: GainNode; osc: OscillatorNode } | null {
+    const Ctx = window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!Ctx) {
+      return null;
+    }
+    if (!this.audioCtx) {
+      this.audioCtx = new Ctx();
+    }
+    const ctx = this.audioCtx;
+    if (ctx.state === 'suspended') {
+      void ctx.resume();
+    }
+    if (!this.projectileToneGain || !this.projectileToneOsc) {
+      const gain = ctx.createGain();
+      gain.gain.value = 0.0001;
+      gain.connect(ctx.destination);
+      const osc = ctx.createOscillator();
+      osc.type = 'triangle';
+      osc.frequency.value = 320;
+      osc.connect(gain);
+      osc.start();
+      this.projectileToneGain = gain;
+      this.projectileToneOsc = osc;
+    }
+    return { ctx, gain: this.projectileToneGain, osc: this.projectileToneOsc };
+  }
+
+  private updateProjectileWhistle(projectiles: BattleRuntimeSnapshot['projectiles']): void {
+    const tracked = projectiles.find(
+      (p) => p.projectileType !== 'digger'
+        && p.projectileType !== 'sandhog'
+        && p.projectileType !== 'roller'
+        && p.projectileType !== 'napalm-burn'
+        && p.projectileType !== 'delayed-blast',
+    );
+
+    if (!tracked) {
+      this.disposeProjectileTone();
+      return;
+    }
+
+    const audio = this.ensureProjectileWhistle();
+    if (!audio) {
+      return;
+    }
+    const { ctx, gain, osc } = audio;
+    const now = ctx.currentTime;
+
+    // y-axis grows downward: negative vy climbs (higher pitch), positive vy descends (lower pitch).
+    const freq = Phaser.Math.Clamp(530 - tracked.vy * 1.25, 180, 980);
+    const targetGain = 0.02;
+    osc.frequency.cancelScheduledValues(now);
+    osc.frequency.linearRampToValueAtTime(freq, now + 0.045);
+    gain.gain.cancelScheduledValues(now);
+    gain.gain.exponentialRampToValueAtTime(targetGain, now + 0.03);
   }
 
   private playExplosionSfx(kind: BattleRuntimeSnapshot['explosions'][number]['kind'], radius: number): void {
@@ -421,13 +502,24 @@ class BattleScene extends Phaser.Scene {
 
     for (const trail of runtime.trails) {
       const owner = match.players.find((p) => p.config.id === trail.ownerId);
-      const color =
-        trail.color
-          ? Phaser.Display.Color.HexStringToColor(trail.color).color
-          : owner
-            ? Phaser.Display.Color.HexStringToColor(TANK_COLORS[owner.config.colorIndex % TANK_COLORS.length]).color
-            : 0xffffff;
-      this.graphics.lineStyle(1, color, Math.max(0.2, trail.life));
+      const ownerColor = owner
+        ? Phaser.Display.Color.HexStringToColor(TANK_COLORS[owner.config.colorIndex % TANK_COLORS.length]).color
+        : null;
+      const color = match.settings.tankColorTrails
+        ? (ownerColor ?? (trail.color ? Phaser.Display.Color.HexStringToColor(trail.color).color : 0xffffff))
+        : (
+          trail.color
+            ? Phaser.Display.Color.HexStringToColor(trail.color).color
+            : ownerColor ?? 0xffffff
+        );
+      const isMirvTrail = trail.color === '#ffe95a'
+        || trail.color === '#d9ff5a'
+        || trail.color === '#9eff4b'
+        || trail.color === '#74ff61'
+        || trail.color === '#89ffbe'
+        || trail.color === '#83ffd8'
+        || trail.color === '#b2ff6f';
+      this.graphics.lineStyle(isMirvTrail ? 2 : 1, color, Math.max(0.2, trail.life));
       this.graphics.lineBetween(trail.x1, trail.y1, trail.x2, trail.y2);
     }
 
@@ -439,6 +531,12 @@ class BattleScene extends Phaser.Scene {
           : owner
             ? Phaser.Display.Color.HexStringToColor(TANK_COLORS[owner.config.colorIndex % TANK_COLORS.length]).color
             : 0xffffff;
+      if (projectile.y < innerY) {
+        const markerX = Phaser.Math.Clamp(Math.floor(projectile.x), innerX, innerX + innerW - 1);
+        this.graphics.fillStyle(color, 1);
+        this.graphics.fillRect(markerX, innerY, 1, 1);
+        continue;
+      }
       if (projectile.projectileType === 'roller') {
         this.graphics.fillStyle(0xececec, 1);
         this.graphics.fillCircle(projectile.x, projectile.y, 2.1);
@@ -452,9 +550,21 @@ class BattleScene extends Phaser.Scene {
         this.graphics.fillRect(Math.floor(projectile.x), Math.floor(projectile.y), 1, 1);
         continue;
       }
+      if (projectile.projectileType === 'sandhog') {
+        this.graphics.fillStyle(0xffdc8a, 1);
+        this.graphics.fillRect(Math.floor(projectile.x), Math.floor(projectile.y), 1, 1);
+        continue;
+      }
       if (projectile.projectileType === 'napalm-burn') {
         this.graphics.fillStyle(0xffd14a, 0.85);
         this.graphics.fillRect(Math.floor(projectile.x), Math.floor(projectile.y), 2, 2);
+        continue;
+      }
+      if (projectile.projectileType === 'mirv-carrier' || projectile.projectileType === 'mirv-child') {
+        this.graphics.fillStyle(0x0e0e0e, 1);
+        this.graphics.fillRect(Math.floor(projectile.x) - 1, Math.floor(projectile.y), 4, 2);
+        this.graphics.fillStyle(0xd42323, 1);
+        this.graphics.fillRect(Math.floor(projectile.x) + 1, Math.floor(projectile.y), 1, 1);
         continue;
       }
       this.graphics.fillStyle(color, 1);
@@ -501,6 +611,16 @@ class BattleScene extends Phaser.Scene {
         continue;
       }
 
+      if (exp.kind === 'fuel-pool') {
+        const spread = exp.radius * (1 + progress * 0.35);
+        const c = exp.color ? Phaser.Display.Color.HexStringToColor(exp.color).color : 0xffa448;
+        this.graphics.fillStyle(c, alpha * 0.35);
+        this.graphics.fillEllipse(exp.x, exp.y, spread * 2.2, spread * 0.65);
+        this.graphics.fillStyle(0xffd07a, alpha * 0.22);
+        this.graphics.fillEllipse(exp.x - spread * 0.15, exp.y - 0.5, spread * 1.3, spread * 0.34);
+        continue;
+      }
+
       if (exp.kind === 'funky') {
         const funkyColors = [0xff2e2e, 0xffb11f, 0xf8ff3c, 0x4cff63, 0x3ec8ff, 0x6c54ff];
         for (let i = 0; i < funkyColors.length; i += 1) {
@@ -511,8 +631,23 @@ class BattleScene extends Phaser.Scene {
         continue;
       }
 
+      if (exp.kind === 'funky-side') {
+        const rNow = Math.max(6, exp.radius * (0.82 + progress * 0.18));
+        this.graphics.fillStyle(0x0a0000, alpha * 0.92);
+        this.graphics.fillCircle(exp.x, exp.y, rNow);
+        this.graphics.fillStyle(0x4a0000, alpha * 0.95);
+        this.graphics.fillCircle(exp.x, exp.y, rNow * 0.82);
+        this.graphics.fillStyle(0x9f0000, alpha * 0.95);
+        this.graphics.fillCircle(exp.x, exp.y, rNow * 0.62);
+        this.graphics.fillStyle(0xff1b1b, alpha * 0.92);
+        this.graphics.fillCircle(exp.x, exp.y, rNow * 0.42);
+        this.graphics.fillStyle(0x2a0000, alpha * 0.95);
+        this.graphics.strokeCircle(exp.x, exp.y, rNow);
+        continue;
+      }
+
       if (exp.kind === 'simple') {
-        const rNow = Math.max(2, exp.radius * (0.1 + progress * 0.95));
+        const rNow = Math.max(2, exp.radius * (0.1 + progress * 0.9));
         const seed = exp.seed ?? 1337;
         this.graphics.fillStyle(0xff9b00, alpha * 0.18);
         this.graphics.fillCircle(exp.x, exp.y, rNow);
@@ -541,6 +676,26 @@ class BattleScene extends Phaser.Scene {
         continue;
       }
 
+      if (exp.kind === 'mirv') {
+        const rNow = Math.max(6, exp.radius * (0.82 + progress * 0.18));
+        const phase = Math.floor(progress * 8 + ((exp.seed ?? 0) % 5)) % 4;
+        const ramp = [0x5a0000, 0x7a0000, 0x9f0000, 0xc80000];
+        const c0 = ramp[phase];
+        const c1 = ramp[(phase + 1) % ramp.length];
+        const c2 = ramp[(phase + 2) % ramp.length];
+        this.graphics.fillStyle(0x0a0000, alpha * 0.92);
+        this.graphics.fillCircle(exp.x, exp.y, rNow);
+        this.graphics.fillStyle(c0, alpha * 0.95);
+        this.graphics.fillCircle(exp.x, exp.y, rNow * 0.82);
+        this.graphics.fillStyle(c1, alpha * 0.95);
+        this.graphics.fillCircle(exp.x, exp.y, rNow * 0.62);
+        this.graphics.fillStyle(c2, alpha * 0.92);
+        this.graphics.fillCircle(exp.x, exp.y, rNow * 0.42);
+        this.graphics.fillStyle(0x2a0000, alpha * 0.95);
+        this.graphics.strokeCircle(exp.x, exp.y, rNow);
+        continue;
+      }
+
       this.graphics.fillStyle(main, alpha);
       this.graphics.fillCircle(exp.x, exp.y, exp.radius);
       this.graphics.fillStyle(0xff5722, alpha * 0.95);
@@ -561,12 +716,13 @@ class BattleScene extends Phaser.Scene {
       const bar = this.getPowerBarRect(match.width);
       this.graphics.fillStyle(0x2c2c2c, 1);
       this.graphics.fillRect(bar.x, bar.y, bar.w, bar.h);
-      const fillW = Math.round(((active.power - 200) / Math.max(1, active.maxPower - 200)) * bar.w);
+      const fillW = Math.round((active.power / Math.max(1, active.maxPower)) * bar.w);
       this.graphics.fillStyle(0x7b1010, 1);
       this.graphics.fillRect(bar.x, bar.y, Phaser.Math.Clamp(fillW, 0, bar.w), bar.h);
       this.graphics.lineStyle(1, 0x111111, 1);
       this.graphics.strokeRect(bar.x, bar.y, bar.w, bar.h);
-      this.hudText.setText(`Ammo:${active.inventory[active.selectedWeaponId] ?? 0}  Power:${Math.round(active.power)}  Limit:${Math.round(active.maxPower)}  Angle:${Math.round(active.angle)}  Weapon:${active.selectedWeaponId}  Wind:${Math.round(Math.abs(match.wind * 8))}${match.wind >= 0 ? '->' : '<-'}`);
+      const ammoText = match.settings.freeFireMode ? 'INF' : String(active.inventory[active.selectedWeaponId] ?? 0);
+      this.hudText.setText(`Ammo:${ammoText}  Power:${Math.round(active.power)}  Limit:${Math.round(active.maxPower)}  Angle:${Math.round(active.angle)}  Weapon:${active.selectedWeaponId}  Wind:${Math.round(Math.abs(match.wind * 8))}${match.wind >= 0 ? '->' : '<-'}`);
       this.noteText.setText(`${message || `Round ${match.roundIndex}/${match.settings.roundsToWin}`}  Health:${Math.round(active.hp)}%  Fuel:${Math.round(active.fuel)}  Chutes:${active.parachutes}`);
     }
   }

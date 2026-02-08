@@ -120,6 +120,97 @@ export function addDirt(terrain: TerrainState, cx: number, cy: number, radius: n
   };
 }
 
+export function addDirtDisk(terrain: TerrainState, cx: number, cy: number, radius: number, settle = true): TerrainState {
+  const next = new Uint8Array(terrain.mask);
+  const r2 = radius * radius;
+  const minX = Math.max(0, Math.floor(cx - radius));
+  const maxX = Math.min(terrain.width - 1, Math.ceil(cx + radius));
+  const minY = Math.max(0, Math.floor(cy - radius));
+  const maxY = Math.min(terrain.height - 1, Math.ceil(cy + radius));
+
+  for (let y = minY; y <= maxY; y += 1) {
+    for (let x = minX; x <= maxX; x += 1) {
+      const dx = x - cx;
+      const dy = y - cy;
+      if (dx * dx + dy * dy <= r2) {
+        next[y * terrain.width + x] = 1;
+      }
+    }
+  }
+
+  if (settle) {
+    settleMask(next, terrain.width, terrain.height);
+  }
+
+  return {
+    ...terrain,
+    revision: terrain.revision + 1,
+    mask: next as Uint8Array,
+    heights: rebuildHeights(next, terrain.width, terrain.height),
+  };
+}
+
+export function addLiquidDirt(
+  terrain: TerrainState,
+  cx: number,
+  cy: number,
+  range = 220,
+  maxCells = 18000,
+  settle = true,
+): TerrainState {
+  const width = terrain.width;
+  const height = terrain.height;
+  const source = terrain.mask;
+  const mask = new Uint8Array(source);
+  const startX = clamp(Math.floor(cx), 0, width - 1);
+  let startY = clamp(Math.floor(cy) - 1, 0, height - 1);
+  while (startY > 0 && source[startY * width + startX] === 1) {
+    startY -= 1;
+  }
+  const minX = Math.max(0, startX - range);
+  const maxX = Math.min(width - 1, startX + range);
+  const queue: Array<[number, number]> = [[startX, startY]];
+  const visited = new Uint8Array(width * height);
+  const basin: Array<{ x: number; y: number }> = [];
+
+  while (queue.length > 0) {
+    const [x, y] = queue.pop() as [number, number];
+    if (x < minX || x > maxX || y < 0 || y >= height) {
+      continue;
+    }
+    const idx = y * width + x;
+    if (visited[idx] === 1 || source[idx] === 1) {
+      continue;
+    }
+    visited[idx] = 1;
+    basin.push({ x, y });
+    queue.push([x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]);
+  }
+
+  if (basin.length === 0) {
+    return terrain;
+  }
+
+  // Fixed-volume liquid: fill lowest reachable air first.
+  basin.sort((a, b) => (b.y - a.y) || (Math.abs(a.x - startX) - Math.abs(b.x - startX)));
+  const budget = Math.max(1, Math.min(maxCells, basin.length));
+  for (let i = 0; i < budget; i += 1) {
+    const cell = basin[i];
+    mask[cell.y * width + cell.x] = 1;
+  }
+
+  if (settle) {
+    settleMask(mask, width, height);
+  }
+
+  return {
+    ...terrain,
+    revision: terrain.revision + 1,
+    mask: mask as Uint8Array,
+    heights: rebuildHeights(mask, width, height),
+  };
+}
+
 export function flattenBaseForTank(
   terrain: TerrainState,
   cx: number,

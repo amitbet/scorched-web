@@ -194,7 +194,7 @@ export function drawNukeExplosion(
     radiusScale = 0.08 + (1 - (1 - t) * (1 - t)) * 0.92;
   }
 
-  const rNow = Math.max(2, exp.radius * 1.12 * radiusScale);
+  const rNow = Math.max(2, exp.radius * radiusScale);
 
   // Palette rotation runs through whole effect; slightly slower during dissipation.
   const rotationRate = progress < growT + holdT ? 12.5 : 8.0;

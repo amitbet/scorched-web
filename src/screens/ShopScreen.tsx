@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import type { PlayerState } from '../types/game';
 import { WEAPONS } from '../game/WeaponCatalog';
 import { canBuy } from '../game/Economy';
+import { getWeaponIcon } from '../game/WeaponIcons';
 
 interface ShopScreenProps {
   players: PlayerState[];
@@ -50,6 +51,7 @@ export function ShopScreen({ players, currentIndex, onBuy, onSell, onNext, onDon
           const sellAllowed = qty >= weapon.packQty;
           return (
             <div className="weapon-row" key={weapon.id}>
+              <img className="weapon-icon" src={getWeaponIcon(weapon.id)} alt={`${weapon.name} icon`} />
               <div className="weapon-info">
                 <strong>{weapon.name}</strong>
                 <div className="weapon-meta">
