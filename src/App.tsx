@@ -404,6 +404,118 @@ export default function App(): JSX.Element {
     };
   }, []);
 
+  const placePlayersOnTerrain = useCallback((matchIn: MatchState, terrainIn: TerrainState): { match: MatchState; terrain: TerrainState } => {
+    const players = matchIn.players;
+    if (players.length === 0) {
+      return { match: matchIn, terrain: terrainIn };
+    }
+
+    let terrainOut = terrainIn;
+    const margin = Math.max(22, Math.floor(terrainIn.width * 0.08));
+    const minSep = Math.max(20, Math.floor((terrainIn.width - 2 * margin) / Math.max(2, players.length * 1.2)));
+    const minX = margin;
+    const maxX = Math.max(minX + 1, terrainIn.width - margin - 1);
+    const isStableSpawnX = (x: number, terrainState: TerrainState): boolean => {
+      const left = Math.max(0, x - 7);
+      const right = Math.min(terrainState.width - 1, x + 7);
+      let low = terrainState.height;
+      let high = 0;
+      for (let sx = left; sx <= right; sx += 1) {
+        const h = terrainState.heights[sx];
+        if (h < low) {
+          low = h;
+        }
+        if (h > high) {
+          high = h;
+        }
+      }
+      if (high - low > 5) {
+        return false;
+      }
+      const leftH = terrainState.heights[Math.max(0, x - 5)];
+      const rightH = terrainState.heights[Math.min(terrainState.width - 1, x + 5)];
+      return Math.abs(leftH - rightH) <= 3;
+    };
+    const supportCountAt = (terrainState: TerrainState, x: number, y: number): number => {
+      const footY = Math.floor(y + 5);
+      let count = 0;
+      for (let sx = Math.max(0, x - 6); sx <= Math.min(terrainState.width - 1, x + 6); sx += 1) {
+        if (isSolid(terrainState, sx, footY) || isSolid(terrainState, sx, footY + 1)) {
+          count += 1;
+        }
+      }
+      return count;
+    };
+    const bodyOverlapCountAt = (terrainState: TerrainState, x: number, y: number): number => {
+      let count = 0;
+      const minXBody = Math.max(0, x - 6);
+      const maxXBody = Math.min(terrainState.width - 1, x + 6);
+      const minYBody = Math.max(0, Math.floor(y - 4));
+      const maxYBody = Math.min(terrainState.height - 1, Math.floor(y + 1));
+      for (let sx = minXBody; sx <= maxXBody; sx += 1) {
+        for (let sy = minYBody; sy <= maxYBody; sy += 1) {
+          if (isSolid(terrainState, sx, sy)) {
+            count += 1;
+          }
+        }
+      }
+      return count;
+    };
+    const solveSeatedY = (terrainState: TerrainState, x: number): number => {
+      let y = terrainState.heights[x] - 4;
+      for (let i = 0; i < 8; i += 1) {
+        if (bodyOverlapCountAt(terrainState, x, y) <= 6) {
+          break;
+        }
+        y -= 1;
+      }
+      for (let i = 0; i < 12; i += 1) {
+        if (supportCountAt(terrainState, x, y) >= 4) {
+          break;
+        }
+        y += 1;
+      }
+      return y;
+    };
+
+    const picks: number[] = [];
+    for (let i = 0; i < players.length; i += 1) {
+      let best = clamp(Math.floor(minX + Math.random() * (maxX - minX + 1)), minX, maxX);
+      let found = false;
+      for (let attempt = 0; attempt < 180; attempt += 1) {
+        const candidate = clamp(Math.floor(minX + Math.random() * (maxX - minX + 1)), minX, maxX);
+        if (!isStableSpawnX(candidate, terrainOut)) {
+          continue;
+        }
+        if (picks.every((x) => Math.abs(x - candidate) >= minSep)) {
+          best = candidate;
+          found = true;
+          break;
+        }
+        if (picks.every((x) => Math.abs(x - candidate) >= Math.max(10, Math.floor(minSep * 0.6)))) {
+          best = candidate;
+        }
+      }
+      picks.push(found ? best : best);
+    }
+
+    const nextPlayers = players.map((player, i) => {
+      const x = picks[i];
+      const y = solveSeatedY(terrainOut, x);
+      return {
+        ...player,
+        x,
+        y,
+        fallDistance: 0,
+      };
+    });
+
+    return {
+      match: { ...matchIn, players: nextPlayers },
+      terrain: terrainOut,
+    };
+  }, []);
+
   const fireWeapon = useCallback((sourceMatch: MatchState, shooter: PlayerState) => {
     const weapon = getWeaponById(shooter.selectedWeaponId);
     const ammo = shooter.inventory[weapon.id] ?? 0;
@@ -589,6 +701,25 @@ export default function App(): JSX.Element {
     let nextMatch = currentMatch;
     let terrainNeedsSettle = false;
 
+    const groundPlayersToTerrain = (matchState: MatchState, terrainState: TerrainState): MatchState => ({
+      ...matchState,
+      players: matchState.players.map((player) => {
+        if (!player.alive) {
+          return player;
+        }
+        const x = clamp(Math.floor(player.x), 0, terrainState.width - 1);
+        const groundY = terrainState.heights[x] - 4;
+        if (Math.abs(player.y - groundY) < 0.5) {
+          return player;
+        }
+        return {
+          ...player,
+          y: groundY,
+          fallDistance: 0,
+        };
+      }),
+    });
+
     const enqueueTerrainEdit = (
       mode: 'crater' | 'tunnel' | 'addDirt',
       x: number,
@@ -651,6 +782,8 @@ export default function App(): JSX.Element {
       if (runtime.terrainEdits.length === 0 && terrainNeedsSettle) {
         nextTerrain = settleTerrain(nextTerrain);
       }
+
+      nextMatch = groundPlayersToTerrain(nextMatch, nextTerrain);
 
       runtime.explosions = runtime.explosions
         .map((e) => ({ ...e, maxLife: e.maxLife ?? e.life, life: e.life - FIXED_DT }))
@@ -1028,6 +1161,7 @@ export default function App(): JSX.Element {
     runtime.projectiles = [...survivors, ...spawnedProjectiles];
     if (terrainNeedsSettle && runtime.projectiles.length === 0 && runtime.terrainEdits.length === 0) {
       nextTerrain = settleTerrain(nextTerrain);
+      nextMatch = groundPlayersToTerrain(nextMatch, nextTerrain);
     }
     runtime.explosions = runtime.explosions
       .map((e) => ({ ...e, maxLife: e.maxLife ?? e.life, life: e.life - FIXED_DT }))
@@ -1133,25 +1267,13 @@ export default function App(): JSX.Element {
             postRound.players.length,
           );
           const regenerated = generated.terrain;
-          const spacing = regenerated.width / (postRound.players.length + 1);
-          const reseated = {
-            ...postRound,
-            players: postRound.players.map((p, i) => {
-              const nx = Math.floor(spacing * (i + 1));
-              return {
-                ...p,
-                x: nx,
-                y: regenerated.heights[nx] - 8,
-                fallDistance: 0,
-                selectedWeaponId: p.selectedWeaponId,
-              };
-            }),
-          };
+          const placed = placePlayersOnTerrain(postRound, regenerated);
+          const reseated = placed.match;
           runtimeRef.current = { projectiles: [], explosions: [], trails: [], terrainEdits: [] };
           matchRef.current = reseated;
-          terrainRef.current = regenerated;
+          terrainRef.current = placed.terrain;
           setMatch(reseated);
-          setTerrain(regenerated);
+          setTerrain(placed.terrain);
           setShopIndex(0);
           setScreen('shop');
         })();
@@ -1174,7 +1296,7 @@ export default function App(): JSX.Element {
 
     matchRef.current = nextMatch;
     terrainRef.current = nextTerrain;
-  }, [makeTerrainForRound]);
+  }, [makeTerrainForRound, placePlayersOnTerrain]);
 
   useEffect(() => {
     if (!match || !terrain || screen !== 'battle') {
@@ -1287,26 +1409,23 @@ export default function App(): JSX.Element {
       existingMatch.players.length,
     );
     const regenerated = generated.terrain;
-    const spacing = regenerated.width / (existingMatch.players.length + 1);
-    const players = existingMatch.players.map((p, i) => {
-      const x = Math.floor(spacing * (i + 1));
-      const roundReady = {
+    const prepared = {
+      ...existingMatch,
+      players: existingMatch.players.map((p) => ({
         ...p,
-        x,
-        y: regenerated.heights[x] - 8,
-        fallDistance: 0,
         alive: true,
         hp: 100,
         maxPower: 1000,
         power: clamp(p.power, 200, 1000),
         fuel: Math.max(0, p.inventory.fuel ?? 0),
-      };
-      return autoActivateShieldAtRoundStart(roundReady);
-    });
-    const next = { ...existingMatch, players, phase: 'aim' as const, activePlayerId: players[0].config.id };
-    terrainRef.current = regenerated;
+      })),
+    };
+    const placed = placePlayersOnTerrain(prepared, regenerated);
+    const nextPlayers = placed.match.players.map((p) => autoActivateShieldAtRoundStart(p));
+    const next = { ...placed.match, players: nextPlayers, phase: 'aim' as const, activePlayerId: nextPlayers[0].config.id };
+    terrainRef.current = placed.terrain;
     matchRef.current = next;
-    setTerrain(regenerated);
+    setTerrain(placed.terrain);
     setMatch(next);
     runtimeRef.current = { projectiles: [], explosions: [], trails: [], terrainEdits: [] };
     simulationAccumulatorRef.current = 0;
@@ -1316,7 +1435,7 @@ export default function App(): JSX.Element {
     movementTickAccumulatorRef.current = 0;
     setScreen('battle');
     setMessage(`Terrain: ${generated.source}`);
-  }, [makeTerrainForRound]);
+  }, [makeTerrainForRound, placePlayersOnTerrain]);
 
   const useShieldFromPopup = useCallback((shieldId: 'shield' | 'medium-shield' | 'heavy-shield') => {
     const liveMatch = matchRef.current;
@@ -1395,23 +1514,11 @@ export default function App(): JSX.Element {
               seededMatch.players.length,
             );
             const newTerrain = generated.terrain;
-            const spacing = newTerrain.width / (seededMatch.players.length + 1);
-            const newMatch = {
-              ...seededMatch,
-              players: seededMatch.players.map((p, i) => {
-                const nx = Math.floor(spacing * (i + 1));
-                return {
-                  ...p,
-                  x: nx,
-                  y: newTerrain.heights[nx] - 8,
-                  fallDistance: 0,
-                };
-              }),
-            };
-            matchRef.current = newMatch;
-            terrainRef.current = newTerrain;
-            setMatch(newMatch);
-            setTerrain(newTerrain);
+            const placed = placePlayersOnTerrain(seededMatch, newTerrain);
+            matchRef.current = placed.match;
+            terrainRef.current = placed.terrain;
+            setMatch(placed.match);
+            setTerrain(placed.terrain);
             setShopIndex(0);
             setScreen('shop');
             setMessage(`Terrain ready: ${generated.source}`);

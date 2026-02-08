@@ -391,9 +391,13 @@ class BattleScene extends Phaser.Scene {
       const halfW = Math.floor(bodyW / 2);
       this.graphics.fillStyle(color, 1);
       this.graphics.fillRect(Math.floor(player.x - halfW), Math.floor(player.y - 4), bodyW, bodyH);
+      // Keep wheel detail inside the tank body so the silhouette stays compact.
       this.graphics.fillStyle(0x181818, 1);
-      this.graphics.fillRect(Math.floor(player.x - 5), Math.floor(player.y + 2), 4, 3);
-      this.graphics.fillRect(Math.floor(player.x + 1), Math.floor(player.y + 2), 4, 3);
+      this.graphics.fillRect(Math.floor(player.x - 5), Math.floor(player.y - 1), 4, 2);
+      this.graphics.fillRect(Math.floor(player.x + 1), Math.floor(player.y - 1), 4, 2);
+      this.graphics.fillStyle(0xdcdcdc, 1);
+      this.graphics.fillRect(Math.floor(player.x - 4), Math.floor(player.y), 2, 1);
+      this.graphics.fillRect(Math.floor(player.x + 2), Math.floor(player.y), 2, 1);
       const r = (player.angle * Math.PI) / 180;
       this.graphics.lineStyle(2, color, 1);
       this.graphics.lineBetween(player.x, player.y - 1, player.x + Math.cos(r) * 9, player.y - Math.sin(r) * 9);
@@ -633,7 +637,7 @@ export function BattleScreen({
   return (
     <div className="screen battle-screen">
       <div ref={hostRef} className="battle-host" />
-      <div className="battle-note-overlay">{`${message || `Round ${match.roundIndex}`} | Controls: A/D fuel move, Arrows angle/power, Alt+Up/Down fast power, Alt+Left/Right quick angle, Tab weapon, I inventory shields`}</div>
+      <div className="battle-footer">{`${message || `Round ${match.roundIndex}`} | Controls: A/D fuel move, Arrows angle/power, Alt+Up/Down fast power, Alt+Left/Right quick angle, Tab weapon, I inventory shields`}</div>
       {shieldMenuOpen && (
         <div className="shield-popup">
           <div className="shield-popup-title">{`Shield Settings - ${shieldMenuPlayerName}`}</div>

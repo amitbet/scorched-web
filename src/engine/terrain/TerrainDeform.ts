@@ -1,5 +1,9 @@
 import type { TerrainState } from '../../types/game';
 
+function clamp(v: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, v));
+}
+
 function rebuildHeights(mask: Uint8Array, width: number, height: number): number[] {
   const heights = new Array<number>(width);
   for (let x = 0; x < width; x += 1) {
@@ -113,5 +117,130 @@ export function addDirt(terrain: TerrainState, cx: number, cy: number, radius: n
     revision: terrain.revision + 1,
     mask: next as Uint8Array,
     heights: rebuildHeights(next, terrain.width, terrain.height),
+  };
+}
+
+export function flattenBaseForTank(
+  terrain: TerrainState,
+  cx: number,
+  halfWidth = 7,
+  drop = 3,
+): TerrainState {
+  const minX = Math.max(0, Math.floor(cx - halfWidth));
+  const maxX = Math.min(terrain.width - 1, Math.ceil(cx + halfWidth));
+  const mask = new Uint8Array(terrain.mask);
+  const highest = Math.min(...terrain.heights.slice(minX, maxX + 1));
+  const targetTop = clamp(highest + drop, 0, terrain.height - 2);
+
+  for (let x = minX; x <= maxX; x += 1) {
+    const top = terrain.heights[x];
+    if (top < targetTop) {
+      for (let y = top; y < targetTop; y += 1) {
+        mask[y * terrain.width + x] = 0;
+      }
+    } else if (top > targetTop) {
+      for (let y = targetTop; y < top; y += 1) {
+        mask[y * terrain.width + x] = 1;
+      }
+    }
+  }
+
+  return {
+    ...terrain,
+    revision: terrain.revision + 1,
+    mask: mask as Uint8Array,
+    heights: rebuildHeights(mask, terrain.width, terrain.height),
+  };
+}
+
+export function carveTankBase(
+  terrain: TerrainState,
+  cx: number,
+  tankY: number,
+  halfWidth = 7,
+  depth = 2,
+): TerrainState {
+  const minX = Math.max(0, Math.floor(cx - halfWidth));
+  const maxX = Math.min(terrain.width - 1, Math.ceil(cx + halfWidth));
+  const baseTop = clamp(Math.floor(tankY + 4), 0, terrain.height - 1);
+  const baseBottom = clamp(baseTop + Math.max(0, depth - 1), 0, terrain.height - 1);
+  const mask = new Uint8Array(terrain.mask);
+
+  for (let x = minX; x <= maxX; x += 1) {
+    for (let y = baseTop; y <= baseBottom; y += 1) {
+      mask[y * terrain.width + x] = 0;
+    }
+  }
+
+  return {
+    ...terrain,
+    revision: terrain.revision + 1,
+    mask: mask as Uint8Array,
+    heights: rebuildHeights(mask, terrain.width, terrain.height),
+  };
+}
+
+export function clearRect(
+  terrain: TerrainState,
+  minX: number,
+  minY: number,
+  maxX: number,
+  maxY: number,
+): TerrainState {
+  const clampedMinX = clamp(Math.floor(minX), 0, terrain.width - 1);
+  const clampedMaxX = clamp(Math.floor(maxX), 0, terrain.width - 1);
+  const clampedMinY = clamp(Math.floor(minY), 0, terrain.height - 1);
+  const clampedMaxY = clamp(Math.floor(maxY), 0, terrain.height - 1);
+  if (clampedMaxX < clampedMinX || clampedMaxY < clampedMinY) {
+    return terrain;
+  }
+
+  const mask = new Uint8Array(terrain.mask);
+  for (let x = clampedMinX; x <= clampedMaxX; x += 1) {
+    for (let y = clampedMinY; y <= clampedMaxY; y += 1) {
+      mask[y * terrain.width + x] = 0;
+    }
+  }
+
+  return {
+    ...terrain,
+    revision: terrain.revision + 1,
+    mask: mask as Uint8Array,
+    heights: rebuildHeights(mask, terrain.width, terrain.height),
+  };
+}
+
+export function carveFlatPad(
+  terrain: TerrainState,
+  cx: number,
+  halfWidth = 7,
+  sink = 2,
+): { terrain: TerrainState; topY: number } {
+  const minX = Math.max(0, Math.floor(cx - halfWidth));
+  const maxX = Math.min(terrain.width - 1, Math.ceil(cx + halfWidth));
+  let targetTop = 0;
+  for (let x = minX; x <= maxX; x += 1) {
+    targetTop = Math.max(targetTop, terrain.heights[x]);
+  }
+  targetTop = clamp(targetTop + Math.max(0, sink), 0, terrain.height - 2);
+  const mask = new Uint8Array(terrain.mask);
+
+  for (let x = minX; x <= maxX; x += 1) {
+    const top = terrain.heights[x];
+    if (top < targetTop) {
+      for (let y = top; y < targetTop; y += 1) {
+        mask[y * terrain.width + x] = 0;
+      }
+    }
+  }
+
+  return {
+    terrain: {
+      ...terrain,
+      revision: terrain.revision + 1,
+      mask: mask as Uint8Array,
+      heights: rebuildHeights(mask, terrain.width, terrain.height),
+    },
+    topY: targetTop,
   };
 }
