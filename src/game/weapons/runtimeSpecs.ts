@@ -1,6 +1,6 @@
 import type { ProjectileState } from '../../types/game';
 
-export type ImpactMode = 'default' | 'mirv' | 'roller' | 'digger' | 'sandhog' | 'funky' | 'napalm' | 'sand' | 'dirt' | 'liquid';
+export type ImpactMode = 'default' | 'mirv' | 'roller' | 'digger' | 'sandhog' | 'funky' | 'napalm' | 'sand' | 'dirt' | 'liquid' | 'riot-bomb' | 'riot-blast' | 'leapfrog' | 'tracer';
 
 export interface WeaponRuntimeSpec {
   id: string;
@@ -24,9 +24,17 @@ const DEFAULT_SPEC: WeaponRuntimeSpec = {
 };
 
 const WEAPON_RUNTIME_SPECS: Record<string, WeaponRuntimeSpec> = {
+  'baby-missile': { id: 'baby-missile', launchProjectileType: 'ballistic', impactMode: 'default' },
   missile: { id: 'missile', launchProjectileType: 'ballistic', impactMode: 'default' },
+  'riot-charge': { id: 'riot-charge', launchProjectileType: 'ballistic', impactMode: 'riot-blast' },
+  'riot-blast': { id: 'riot-blast', launchProjectileType: 'ballistic', impactMode: 'riot-blast' },
+  'riot-bomb': { id: 'riot-bomb', launchProjectileType: 'ballistic', impactMode: 'riot-bomb' },
+  'heavy-riot-bomb': { id: 'heavy-riot-bomb', launchProjectileType: 'ballistic', impactMode: 'riot-bomb' },
   'baby-nuke': { id: 'baby-nuke', launchProjectileType: 'ballistic', impactMode: 'default' },
   nuke: { id: 'nuke', launchProjectileType: 'ballistic', impactMode: 'default' },
+  leapfrog: { id: 'leapfrog', launchProjectileType: 'ballistic', impactMode: 'leapfrog' },
+  tracer: { id: 'tracer', launchProjectileType: 'ballistic', impactMode: 'tracer' },
+  'smoke-tracer': { id: 'smoke-tracer', launchProjectileType: 'ballistic', impactMode: 'tracer' },
   'sand-bomb': { id: 'sand-bomb', launchProjectileType: 'ballistic', impactMode: 'sand' },
   'ton-of-dirt': { id: 'ton-of-dirt', launchProjectileType: 'ballistic', impactMode: 'dirt' },
   'liquid-dirt': { id: 'liquid-dirt', launchProjectileType: 'ballistic', impactMode: 'liquid' },
@@ -43,8 +51,6 @@ const WEAPON_RUNTIME_SPECS: Record<string, WeaponRuntimeSpec> = {
   'heavy-sandhog': { id: 'heavy-sandhog', launchProjectileType: 'ballistic', impactMode: 'sandhog', sandhogDuration: 1.9 },
 
   'funky-bomb': { id: 'funky-bomb', launchProjectileType: 'ballistic', impactMode: 'funky', funkyChildCount: 6 },
-  'funky-nuke': { id: 'funky-nuke', launchProjectileType: 'ballistic', impactMode: 'funky', funkyChildCount: 10 },
-
   napalm: {
     id: 'napalm',
     launchProjectileType: 'ballistic',

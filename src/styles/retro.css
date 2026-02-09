@@ -174,10 +174,10 @@ label {
 }
 
 .weapon-icon {
-  width: 18px;
-  height: 18px;
+  width: 28px;
+  height: 28px;
   image-rendering: pixelated;
-  border: 1px solid #aeb3d1;
+  border: 1px solid #5f6888;
   background: #2b2f4f;
   flex: 0 0 auto;
 }

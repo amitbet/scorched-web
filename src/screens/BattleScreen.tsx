@@ -3,11 +3,14 @@ import Phaser from 'phaser';
 import type { MatchState, TerrainState } from '../types/game';
 import { TANK_COLORS } from '../types/game';
 import { drawNukeExplosion } from '../game/fx/nukeEffect';
+import { getWeaponById, WEAPONS } from '../game/WeaponCatalog';
+import { getWeaponIcon } from '../game/WeaponIcons';
 
 export interface BattleRuntimeSnapshot {
   projectiles: {
     x: number;
     y: number;
+    vx: number;
     vy: number;
     ownerId: string;
     weaponId: string;
@@ -22,9 +25,10 @@ export interface BattleRuntimeSnapshot {
     life: number;
     maxLife?: number;
     color?: string;
-    kind?: 'burst' | 'simple' | 'fire' | 'laser' | 'sand' | 'funky' | 'nuke' | 'mirv' | 'funky-side' | 'fuel-pool';
+    kind?: 'burst' | 'simple' | 'fire' | 'laser' | 'sand' | 'funky' | 'nuke' | 'mirv' | 'funky-side' | 'fuel-pool' | 'riot-rings' | 'riot-blast';
     beamHeight?: number;
     seed?: number;
+    direction?: number;
     paused?: boolean;
     tag?: string;
   }[];
@@ -68,7 +72,10 @@ class BattleScene extends Phaser.Scene {
   private backgroundGraphics!: Phaser.GameObjects.Graphics;
   private graphics!: Phaser.GameObjects.Graphics;
   private terrainImage: Phaser.GameObjects.Image | null = null;
+  private weaponIcon!: Phaser.GameObjects.Image;
   private hudText!: Phaser.GameObjects.Text;
+  private hudWeaponLabelText!: Phaser.GameObjects.Text;
+  private hudWeaponValueText!: Phaser.GameObjects.Text;
   private noteText!: Phaser.GameObjects.Text;
   private keys!: {
     a: Phaser.Input.Keyboard.Key;
@@ -94,9 +101,24 @@ class BattleScene extends Phaser.Scene {
   private audioCtx: AudioContext | null = null;
   private projectileToneOsc: OscillatorNode | null = null;
   private projectileToneGain: GainNode | null = null;
+  private trackedWhistlePos: { x: number; y: number } | null = null;
+  private readonly weaponIconTexturePrefix = 'weapon-icon-hud-';
 
   private getPowerBarRect(width: number): { x: number; y: number; w: number; h: number } {
     return { x: Math.max(300, width - 180), y: 4, w: 150, h: 10 };
+  }
+
+  private weaponIconTextureKey(weaponId: string): string {
+    return `${this.weaponIconTexturePrefix}${weaponId}`;
+  }
+
+  private queueWeaponIconTextures(): void {
+    for (const weapon of WEAPONS) {
+      const key = this.weaponIconTextureKey(weapon.id);
+      if (!this.textures.exists(key)) {
+        this.load.image(key, getWeaponIcon(weapon.id, { variant: 'hud' }));
+      }
+    }
   }
 
   constructor() {
@@ -108,13 +130,30 @@ class BattleScene extends Phaser.Scene {
     this.onInputFrame = data.onInputFrame;
   }
 
+  preload(): void {
+    this.queueWeaponIconTextures();
+  }
+
   create(): void {
     this.backgroundGraphics = this.add.graphics();
     this.backgroundGraphics.setDepth(1);
     this.graphics = this.add.graphics();
     this.graphics.setDepth(3);
+    const placeholderKey = 'weapon-icon-placeholder';
+    if (!this.textures.exists(placeholderKey)) {
+      this.textures.generate(placeholderKey, { data: ['1'], pixelWidth: 1 });
+    }
+    this.weaponIcon = this.add.image(8, 12, placeholderKey);
+    this.weaponIcon.setDisplaySize(8, 8);
+    this.weaponIcon.setOrigin(0, 0.5);
+    this.weaponIcon.setDepth(4);
+    this.weaponIcon.setAlpha(0);
     this.hudText = this.add.text(8, 6, '', { fontFamily: 'Courier New', fontSize: '12px', color: '#111111' });
     this.hudText.setDepth(4);
+    this.hudWeaponLabelText = this.add.text(0, 6, 'Weapon:', { fontFamily: 'Courier New', fontSize: '12px', color: '#111111' });
+    this.hudWeaponLabelText.setDepth(4);
+    this.hudWeaponValueText = this.add.text(0, 6, '', { fontFamily: 'Courier New', fontSize: '12px', color: '#111111' });
+    this.hudWeaponValueText.setDepth(4);
     this.noteText = this.add.text(8, 22, '', { fontFamily: 'Courier New', fontSize: '12px', color: '#111111' });
     this.noteText.setDepth(4);
 
@@ -217,19 +256,28 @@ class BattleScene extends Phaser.Scene {
 
     this.onInputFrame(input, deltaMs);
 
+    this.updateProjectileWhistle(snapshot.runtime.projectiles, snapshot.match.height);
+
+    const newExplosions: BattleRuntimeSnapshot['explosions'] = [];
     for (const exp of snapshot.runtime.explosions) {
       if (this.seenExplosionIds.has(exp.id)) {
         continue;
       }
       this.seenExplosionIds.add(exp.id);
-      this.playExplosionSfx(exp.kind, exp.radius);
+      newExplosions.push(exp);
     }
-    this.updateProjectileWhistle(snapshot.runtime.projectiles);
+    if (newExplosions.length > 0) {
+      this.disposeProjectileTone();
+      for (const exp of newExplosions) {
+        this.playExplosionSfx(exp.kind, exp.radius);
+      }
+    }
 
     this.renderFrame(snapshot.match, snapshot.terrain, snapshot.runtime, snapshot.message);
   }
 
   private disposeProjectileTone(): void {
+    this.trackedWhistlePos = null;
     if (this.projectileToneOsc) {
       try {
         this.projectileToneOsc.stop();
@@ -263,7 +311,7 @@ class BattleScene extends Phaser.Scene {
       gain.connect(ctx.destination);
       const osc = ctx.createOscillator();
       osc.type = 'triangle';
-      osc.frequency.value = 320;
+      osc.frequency.value = 260;
       osc.connect(gain);
       osc.start();
       this.projectileToneGain = gain;
@@ -272,14 +320,24 @@ class BattleScene extends Phaser.Scene {
     return { ctx, gain: this.projectileToneGain, osc: this.projectileToneOsc };
   }
 
-  private updateProjectileWhistle(projectiles: BattleRuntimeSnapshot['projectiles']): void {
-    const tracked = projectiles.find(
+  private updateProjectileWhistle(projectiles: BattleRuntimeSnapshot['projectiles'], worldHeight: number): void {
+    const candidates = projectiles.filter(
       (p) => p.projectileType !== 'digger'
         && p.projectileType !== 'sandhog'
         && p.projectileType !== 'roller'
         && p.projectileType !== 'napalm-burn'
         && p.projectileType !== 'delayed-blast',
     );
+    const tracked = candidates.reduce<BattleRuntimeSnapshot['projectiles'][number] | null>((best, p) => {
+      if (!best) {
+        return p;
+      }
+      const pVx = Number.isFinite((p as { vx?: number }).vx) ? Math.abs((p as { vx: number }).vx) : 0;
+      const pVy = Number.isFinite(p.vy) ? Math.abs(p.vy) : 0;
+      const bVx = Number.isFinite((best as { vx?: number }).vx) ? Math.abs((best as { vx: number }).vx) : 0;
+      const bVy = Number.isFinite(best.vy) ? Math.abs(best.vy) : 0;
+      return pVx + pVy > bVx + bVy ? p : best;
+    }, null);
 
     if (!tracked) {
       this.disposeProjectileTone();
@@ -293,13 +351,26 @@ class BattleScene extends Phaser.Scene {
     const { ctx, gain, osc } = audio;
     const now = ctx.currentTime;
 
-    // y-axis grows downward: negative vy climbs (higher pitch), positive vy descends (lower pitch).
-    const freq = Phaser.Math.Clamp(530 - tracked.vy * 1.25, 180, 980);
-    const targetGain = 0.02;
-    osc.frequency.cancelScheduledValues(now);
-    osc.frequency.linearRampToValueAtTime(freq, now + 0.045);
-    gain.gain.cancelScheduledValues(now);
-    gain.gain.exponentialRampToValueAtTime(targetGain, now + 0.03);
+    const y = Number.isFinite(tracked.y) ? tracked.y : worldHeight * 0.5;
+    const vy = Number.isFinite(tracked.vy) ? tracked.vy : 0;
+    const prev = this.trackedWhistlePos;
+    const dy = prev ? tracked.y - prev.y : 0;
+    this.trackedWhistlePos = { x: tracked.x, y: tracked.y };
+
+    // Higher altitude and upward movement raise pitch; descending lowers it.
+    const altitudeNorm = Phaser.Math.Clamp(1 - y / Math.max(1, worldHeight), 0, 1);
+    const climbFromDelta = Phaser.Math.Clamp(-dy / 4.5, -1, 1);
+    const climbFromVelocity = Phaser.Math.Clamp(-vy / 320, -1, 1);
+    const movementNorm = climbFromDelta * 0.7 + climbFromVelocity * 0.3;
+
+    const freqRaw = 220 + altitudeNorm * 340 + movementNorm * 190;
+    const freq = Phaser.Math.Clamp(Number.isFinite(freqRaw) ? freqRaw : 260, 170, 980);
+    const detune = Phaser.Math.Clamp(movementNorm * 120, -160, 160);
+    const targetGain = 0.016 + altitudeNorm * 0.017;
+
+    osc.frequency.setTargetAtTime(freq, now, 0.02);
+    osc.detune.setTargetAtTime(detune, now, 0.02);
+    gain.gain.setTargetAtTime(targetGain, now, 0.02);
   }
 
   private playExplosionSfx(kind: BattleRuntimeSnapshot['explosions'][number]['kind'], radius: number): void {
@@ -646,6 +717,43 @@ class BattleScene extends Phaser.Scene {
         continue;
       }
 
+      if (exp.kind === 'riot-rings') {
+        const ringColors = [0x8f36dd, 0xaa4df0, 0xc36bff, 0xdd9bff];
+        for (let i = 0; i < ringColors.length; i += 1) {
+          const rr = exp.radius * (0.25 + i * 0.22 + progress * 0.75);
+          this.graphics.lineStyle(2, ringColors[i], alpha * (0.95 - i * 0.12));
+          this.graphics.strokeCircle(exp.x, exp.y, rr);
+        }
+        this.graphics.fillStyle(0x6f22b7, alpha * 0.2);
+        this.graphics.fillCircle(exp.x, exp.y, Math.max(2, exp.radius * 0.24));
+        continue;
+      }
+
+      if (exp.kind === 'riot-blast') {
+        const dir = exp.direction ?? 1;
+        const center = dir < 0 ? Math.PI : 0;
+        const start = center - Math.PI / 4;
+        const end = center + Math.PI / 4;
+        const arcBands = [0.35, 0.58, 0.82];
+        for (let b = 0; b < arcBands.length; b += 1) {
+          const rr = exp.radius * (arcBands[b] + progress * 0.55);
+          this.graphics.lineStyle(Math.max(1, 2 - b * 0.3), 0xc06aff, alpha * (0.95 - b * 0.18));
+          let prevX = exp.x + Math.cos(start) * rr;
+          let prevY = exp.y + Math.sin(start) * rr;
+          const steps = 9;
+          for (let i = 1; i <= steps; i += 1) {
+            const t = i / steps;
+            const a = start + (end - start) * t;
+            const x = exp.x + Math.cos(a) * rr;
+            const y = exp.y + Math.sin(a) * rr;
+            this.graphics.lineBetween(prevX, prevY, x, y);
+            prevX = x;
+            prevY = y;
+          }
+        }
+        continue;
+      }
+
       if (exp.kind === 'simple') {
         const rNow = Math.max(2, exp.radius * (0.1 + progress * 0.9));
         const seed = exp.seed ?? 1337;
@@ -713,6 +821,15 @@ class BattleScene extends Phaser.Scene {
 
     const active = match.players.find((p) => p.config.id === match.activePlayerId);
     if (active) {
+      const weapon = getWeaponById(active.selectedWeaponId);
+      const iconKey = this.weaponIconTextureKey(weapon.id);
+      if (this.textures.exists(iconKey)) {
+        this.weaponIcon.setTexture(iconKey);
+        this.weaponIcon.setDisplaySize(8, 8);
+        this.weaponIcon.setAlpha(1);
+      } else {
+        this.weaponIcon.setAlpha(0);
+      }
       const bar = this.getPowerBarRect(match.width);
       this.graphics.fillStyle(0x2c2c2c, 1);
       this.graphics.fillRect(bar.x, bar.y, bar.w, bar.h);
@@ -722,7 +839,12 @@ class BattleScene extends Phaser.Scene {
       this.graphics.lineStyle(1, 0x111111, 1);
       this.graphics.strokeRect(bar.x, bar.y, bar.w, bar.h);
       const ammoText = match.settings.freeFireMode ? 'INF' : String(active.inventory[active.selectedWeaponId] ?? 0);
-      this.hudText.setText(`Ammo:${ammoText}  Power:${Math.round(active.power)}  Limit:${Math.round(active.maxPower)}  Angle:${Math.round(active.angle)}  Weapon:${active.selectedWeaponId}  Wind:${Math.round(Math.abs(match.wind * 8))}${match.wind >= 0 ? '->' : '<-'}`);
+      this.hudText.setText(`Ammo:${ammoText}  Power:${Math.round(active.power)}  Limit:${Math.round(active.maxPower)}  Angle:${Math.round(active.angle)}`);
+      const weaponLabelX = 8 + this.hudText.width + 14;
+      this.hudWeaponLabelText.setPosition(weaponLabelX, 6);
+      this.hudWeaponValueText.setText(`${weapon.name}  Wind:${Math.round(Math.abs(match.wind * 8))}${match.wind >= 0 ? '->' : '<-'}`);
+      this.weaponIcon.setPosition(weaponLabelX + this.hudWeaponLabelText.width + 3, 11.5);
+      this.hudWeaponValueText.setPosition(this.weaponIcon.x + 10, 6);
       this.noteText.setText(`${message || `Round ${match.roundIndex}/${match.settings.roundsToWin}`}  Health:${Math.round(active.hp)}%  Fuel:${Math.round(active.fuel)}  Chutes:${active.parachutes}`);
     }
   }

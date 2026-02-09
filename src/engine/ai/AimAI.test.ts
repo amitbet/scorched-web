@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { computeAIShot } from './AimAI';
 import { generateTerrain } from '../terrain/TerrainGenerator';
 import type { MatchState } from '../../types/game';
+import { STARTER_WEAPON_ID } from '../../game/WeaponCatalog';
 
 function fakeMatch(): MatchState {
   return {
@@ -26,7 +27,7 @@ function fakeMatch(): MatchState {
         shield: 0,
         fuel: 100,
         parachutes: 0,
-        inventory: { missile: 999 },
+        inventory: { [STARTER_WEAPON_ID]: 999 },
         alive: true,
         score: 0,
         hp: 100,
@@ -36,7 +37,7 @@ function fakeMatch(): MatchState {
         fallDistance: 0,
         angle: 45,
         power: 160,
-        selectedWeaponId: 'missile',
+        selectedWeaponId: STARTER_WEAPON_ID,
       },
       {
         config: { id: 'b', name: 'B', kind: 'human', aiLevel: 'easy', colorIndex: 1, enabled: true },
@@ -45,7 +46,7 @@ function fakeMatch(): MatchState {
         shield: 0,
         fuel: 100,
         parachutes: 0,
-        inventory: { missile: 999 },
+        inventory: { [STARTER_WEAPON_ID]: 999 },
         alive: true,
         score: 0,
         hp: 100,
@@ -55,7 +56,7 @@ function fakeMatch(): MatchState {
         fallDistance: 0,
         angle: 45,
         power: 160,
-        selectedWeaponId: 'missile',
+        selectedWeaponId: STARTER_WEAPON_ID,
       },
     ],
     roundIndex: 1,

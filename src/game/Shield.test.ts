@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { activateShieldFromInventory, autoActivateShieldAtRoundStart } from './Shield';
+import { STARTER_WEAPON_ID } from './WeaponCatalog';
 import type { PlayerState } from '../types/game';
 
 const basePlayer: PlayerState = {
@@ -9,7 +10,7 @@ const basePlayer: PlayerState = {
   shield: 0,
   fuel: 100,
   parachutes: 0,
-  inventory: { missile: 999 },
+  inventory: { [STARTER_WEAPON_ID]: 999 },
   alive: true,
   score: 0,
   hp: 100,
@@ -19,7 +20,7 @@ const basePlayer: PlayerState = {
   fallDistance: 0,
   angle: 45,
   power: 500,
-  selectedWeaponId: 'missile',
+  selectedWeaponId: STARTER_WEAPON_ID,
 };
 
 describe('Shield', () => {

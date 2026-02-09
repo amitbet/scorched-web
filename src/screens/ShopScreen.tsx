@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import type { PlayerState } from '../types/game';
-import { WEAPONS } from '../game/WeaponCatalog';
+import { STARTER_WEAPON_ID, WEAPONS } from '../game/WeaponCatalog';
 import { canBuy } from '../game/Economy';
 import { getWeaponIcon } from '../game/WeaponIcons';
 
@@ -28,7 +28,7 @@ export function ShopScreen({ players, currentIndex, onBuy, onSell, onNext, onDon
   const [category, setCategory] = useState<'all' | 'weapons' | 'earthworks' | 'misc'>('all');
   const filtered = useMemo(
     () =>
-      WEAPONS.filter((weapon) => weapon.id !== 'missile' && (category === 'all' || weapon.category === category)),
+      WEAPONS.filter((weapon) => weapon.id !== STARTER_WEAPON_ID && (category === 'all' || weapon.category === category)),
     [category],
   );
 

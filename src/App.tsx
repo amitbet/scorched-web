@@ -30,9 +30,10 @@ interface RuntimeState {
     life: number;
     maxLife?: number;
     color?: string;
-    kind?: 'burst' | 'simple' | 'fire' | 'laser' | 'sand' | 'funky' | 'nuke' | 'mirv' | 'funky-side' | 'fuel-pool';
+    kind?: 'burst' | 'simple' | 'fire' | 'laser' | 'sand' | 'funky' | 'nuke' | 'mirv' | 'funky-side' | 'fuel-pool' | 'riot-rings' | 'riot-blast';
     beamHeight?: number;
     seed?: number;
+    direction?: number;
     paused?: boolean;
     tag?: string;
   }[];
@@ -193,7 +194,7 @@ function scorchTerrain(
 }
 
 function effectiveBlastRadius(weaponId: string, baseRadius: number): number {
-  if (weaponId === 'baby-nuke' || weaponId === 'nuke' || weaponId === 'funky-nuke') {
+  if (weaponId === 'baby-nuke' || weaponId === 'nuke') {
     return Math.round(baseRadius * 1.12);
   }
   return baseRadius;
@@ -379,7 +380,20 @@ function emitWeaponImpactFx(
     return;
   }
 
-  const simple = weaponId === 'missile';
+  if (weaponId === 'riot-bomb' || weaponId === 'heavy-riot-bomb') {
+    pushFx(runtime, nextFxId, {
+      x,
+      y,
+      radius: Math.max(18, radius),
+      life: weaponId === 'heavy-riot-bomb' ? 0.7 : 0.56,
+      maxLife: weaponId === 'heavy-riot-bomb' ? 0.7 : 0.56,
+      kind: 'riot-rings',
+      color: '#bb58ff',
+    });
+    return;
+  }
+
+  const simple = weaponId === STARTER_WEAPON_ID || weaponId === 'missile';
   const nukeLike = weaponId === 'baby-nuke' || weaponId === 'nuke';
   pushFx(runtime, nextFxId, {
     x,
@@ -685,6 +699,50 @@ export default function App(): JSX.Element {
     const nextSelectedWeaponId =
       weaponDepleted && (consumedInventory[STARTER_WEAPON_ID] ?? 0) > 0 ? STARTER_WEAPON_ID : shooter.selectedWeaponId;
     const armedShooter = { ...shooter, inventory: consumedInventory, selectedWeaponId: nextSelectedWeaponId };
+    const runtime = runtimeRef.current;
+
+    if (weapon.id === 'riot-blast' || weapon.id === 'riot-charge') {
+      const direction = Math.cos((armedShooter.angle * Math.PI) / 180) >= 0 ? 1 : -1;
+      const trunkX = armedShooter.x + direction * 6;
+      const trunkY = armedShooter.y - 3;
+      const isCharge = weapon.id === 'riot-charge';
+      const rings = isCharge ? 3 : 5;
+      for (let ring = 0; ring < rings; ring += 1) {
+        const ringRadius = (isCharge ? 8 : 10) + ring * (isCharge ? 6 : 8);
+        pushFx(runtime, () => nextFxIdRef.current++, {
+          x: trunkX,
+          y: trunkY,
+          radius: ringRadius,
+          life: (isCharge ? 0.24 : 0.3) + ring * 0.05,
+          maxLife: (isCharge ? 0.24 : 0.3) + ring * 0.05,
+          kind: 'riot-blast',
+          color: '#bb58ff',
+          direction,
+        });
+        const points = (isCharge ? 6 : 8) + ring;
+        for (let i = 0; i < points; i += 1) {
+          const t = i / Math.max(1, points - 1);
+          const offset = (t - 0.5) * (Math.PI / 2);
+          const angle = (direction > 0 ? 0 : Math.PI) + offset;
+          const x = trunkX + Math.cos(angle) * ringRadius;
+          const y = trunkY + Math.sin(angle) * ringRadius;
+          runtime.terrainEdits.push({
+            mode: 'crater',
+            x,
+            y,
+            radius: (isCharge ? 2.8 : 3.6) + ring * 0.2,
+            duration: (isCharge ? 0.24 : 0.32) + ring * 0.06,
+            elapsed: 0,
+            appliedSteps: 0,
+          });
+        }
+      }
+      const armedMatch = { ...updatePlayer(sourceMatch, armedShooter), phase: 'projectile' as const };
+      matchRef.current = armedMatch;
+      setMatch(armedMatch);
+      setMessage(`${armedShooter.config.name} fired ${weapon.name}`);
+      return;
+    }
 
     if (weapon.projectileCount <= 0) {
       const batteryHeal = weapon.id === 'battery' ? 32 : 0;
@@ -715,6 +773,8 @@ export default function App(): JSX.Element {
       const projectileType = weaponSpec.launchProjectileType;
       const color =
         (weapon.id === 'ton-of-dirt' || weapon.id === 'liquid-dirt') ? '#ff5b5b' :
+        weapon.id === 'tracer' ? '#0f0f0f' :
+        weapon.id === 'smoke-tracer' ? '#9f9f9f' :
         projectileType === 'mirv-carrier' ? '#ffe95a' :
         projectileType === 'mirv-child' ? '#8cff5a' :
         undefined;
@@ -1392,7 +1452,7 @@ export default function App(): JSX.Element {
           x2: p.x,
           y2: p.y,
           ownerId: p.ownerId,
-          life: 0.85,
+          life: p.weaponId === 'smoke-tracer' ? 2.6 : p.weaponId === 'tracer' ? 1.8 : 0.85,
           color: p.color,
         });
 
@@ -1577,6 +1637,109 @@ export default function App(): JSX.Element {
         if (weaponSpec.impactMode === 'sand') {
           enqueueTerrainEdit('addDirt', impactX, impactY, 46, 0.55, undefined, 22);
           emitWeaponImpactFx(runtime, () => nextFxIdRef.current++, weapon.id, impactX, impactY, 45, '#d8c386');
+          collided = true;
+          break;
+        }
+
+        if (weaponSpec.impactMode === 'riot-bomb') {
+          const ringCount =
+            weapon.id === 'heavy-riot-bomb' ? 5 :
+            weapon.id === 'riot-bomb' ? 4 : 3;
+          const ringStart =
+            weapon.id === 'heavy-riot-bomb' ? 8 :
+            weapon.id === 'riot-bomb' ? 7 : 6;
+          for (let ring = 0; ring < ringCount; ring += 1) {
+            const ringDistance = ringStart + ring * 7;
+            const nodes = 7 + ring * 2;
+            for (let i = 0; i < nodes; i += 1) {
+              const a = (Math.PI * 2 * i) / nodes;
+              const x = impactX + Math.cos(a) * ringDistance;
+              const y = impactY + Math.sin(a) * ringDistance;
+              enqueueTerrainEdit('crater', x, y, 3.8 + ring * 0.5, 0.36);
+            }
+          }
+          emitWeaponImpactFx(runtime, () => nextFxIdRef.current++, weapon.id, impactX, impactY, weapon.blastRadius, '#bb58ff');
+          collided = true;
+          break;
+        }
+
+        if (weaponSpec.impactMode === 'riot-blast') {
+          const direction = p.vx >= 0 ? 1 : -1;
+          const trunkX = impactX;
+          const trunkY = impactY;
+          const isCharge = weapon.id === 'riot-charge';
+          const rings = isCharge ? 3 : 4;
+          for (let ring = 0; ring < rings; ring += 1) {
+            const ringRadius = (isCharge ? 8 : 10) + ring * (isCharge ? 6 : 8);
+            pushFx(runtime, () => nextFxIdRef.current++, {
+              x: trunkX,
+              y: trunkY,
+              radius: ringRadius,
+              life: (isCharge ? 0.24 : 0.28) + ring * 0.06,
+              maxLife: (isCharge ? 0.24 : 0.28) + ring * 0.06,
+              kind: 'riot-blast',
+              color: '#bb58ff',
+              direction,
+            });
+            const points = (isCharge ? 6 : 8) + ring;
+            for (let i = 0; i < points; i += 1) {
+              const t = i / Math.max(1, points - 1);
+              const offset = (t - 0.5) * (Math.PI / 2);
+              const angle = (direction > 0 ? 0 : Math.PI) + offset;
+              const x = trunkX + Math.cos(angle) * ringRadius;
+              const y = trunkY + Math.sin(angle) * ringRadius;
+              enqueueTerrainEdit('crater', x, y, (isCharge ? 2.8 : 3.5) + ring * 0.2, isCharge ? 0.28 : 0.34);
+            }
+          }
+          collided = true;
+          break;
+        }
+
+        if (weaponSpec.impactMode === 'leapfrog') {
+          const hopStage = Math.max(0, Math.floor(p.state ?? 0));
+          const burstRadius = Math.max(10, weapon.blastRadius - hopStage * 2);
+          const burstDamage = Math.max(14, weapon.damage - hopStage * 4) * 10;
+
+          enqueueTerrainEdit('crater', impactX, impactY, burstRadius, 0.35);
+          emitWeaponImpactFx(runtime, () => nextFxIdRef.current++, weapon.id, impactX, impactY, burstRadius, '#f4f4f4');
+          applyDamageAt(impactX, impactY, burstRadius, burstDamage, p.splitDepth ?? 0);
+
+          // LeapFrog performs exactly three blasts total: impact + 2 short hops.
+          if (hopStage < 2) {
+            const hopDir = Math.sign(p.vx || 1);
+            const hopSpeed = hopStage === 0 ? 88 : 78;
+            const hopLift = hopStage === 0 ? 102 : 92;
+            spawnedProjectiles.push({
+              x: clamp(impactX + hopDir * 2, 1, currentTerrain.width - 2),
+              y: Math.max(2, impactY - 2),
+              vx: hopDir * hopSpeed,
+              vy: -hopLift,
+              ownerId: p.ownerId,
+              weaponId: weapon.id,
+              ttl: 1.8,
+              projectileType: 'ballistic',
+              color: p.color,
+              state: hopStage + 1,
+            });
+          }
+
+          collided = true;
+          break;
+        }
+
+        if (weaponSpec.impactMode === 'tracer') {
+          // Tracer projectiles are path-only: no blast, no crater, no damage.
+          if (weapon.id === 'smoke-tracer') {
+            pushFx(runtime, () => nextFxIdRef.current++, {
+              x: impactX,
+              y: impactY,
+              radius: 5,
+              life: 0.18,
+              maxLife: 0.18,
+              kind: 'sand',
+              color: '#9f9f9f',
+            });
+          }
           collided = true;
           break;
         }
