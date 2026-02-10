@@ -103,6 +103,10 @@ class BattleScene extends Phaser.Scene {
   private projectileToneGain: GainNode | null = null;
   private trackedWhistlePos: { x: number; y: number } | null = null;
   private readonly weaponIconTexturePrefix = 'weapon-icon-hud-';
+  private prevPhase: MatchState['phase'] | null = null;
+  private prevActivePlayerId: string | null = null;
+  private turnIndicatorStartMs = 0;
+  private turnIndicatorEndMs = 0;
 
   private getPowerBarRect(width: number): { x: number; y: number; w: number; h: number } {
     return { x: Math.max(300, width - 180), y: 4, w: 150, h: 10 };
@@ -221,6 +225,10 @@ class BattleScene extends Phaser.Scene {
   update(_time: number, deltaMs: number): void {
     const snapshot = this.getSnapshot();
     if (!snapshot.match || !snapshot.terrain) {
+      this.prevPhase = null;
+      this.prevActivePlayerId = null;
+      this.turnIndicatorStartMs = 0;
+      this.turnIndicatorEndMs = 0;
       this.backgroundGraphics.clear();
       this.graphics.clear();
       this.backgroundGraphics.fillStyle(0x090c2b, 1);
@@ -273,7 +281,21 @@ class BattleScene extends Phaser.Scene {
       }
     }
 
+    this.updateTurnIndicator(snapshot.match);
     this.renderFrame(snapshot.match, snapshot.terrain, snapshot.runtime, snapshot.message);
+  }
+
+  private updateTurnIndicator(match: MatchState): void {
+    const now = this.time.now;
+    const enteredAimPhase = match.phase === 'aim' && this.prevPhase !== 'aim';
+    const changedActivePlayer = match.phase === 'aim' && this.prevActivePlayerId !== null && match.activePlayerId !== this.prevActivePlayerId;
+    const firstAimFrame = match.phase === 'aim' && this.prevActivePlayerId === null;
+    if (enteredAimPhase || changedActivePlayer || firstAimFrame) {
+      this.turnIndicatorStartMs = now;
+      this.turnIndicatorEndMs = now + 1600;
+    }
+    this.prevPhase = match.phase;
+    this.prevActivePlayerId = match.activePlayerId;
   }
 
   private disposeProjectileTone(): void {
@@ -820,6 +842,20 @@ class BattleScene extends Phaser.Scene {
     this.graphics.strokeRect(innerX - 0.5, innerY - 0.5, innerW + 1, innerH + 1);
 
     const active = match.players.find((p) => p.config.id === match.activePlayerId);
+    if (active && this.time.now < this.turnIndicatorEndMs) {
+      const durationMs = Math.max(1, this.turnIndicatorEndMs - this.turnIndicatorStartMs);
+      const elapsed = Phaser.Math.Clamp((this.time.now - this.turnIndicatorStartMs) / durationMs, 0, 1);
+      const pulse = 0.55 + Math.abs(Math.sin(elapsed * Math.PI * 4.5)) * 0.45;
+      const fade = 1 - elapsed * 0.55;
+      const alpha = Phaser.Math.Clamp(pulse * fade, 0.2, 1);
+      const bob = Math.sin(elapsed * Math.PI * 5) * 2.5 * (1 - elapsed * 0.4);
+      const tipY = Math.max(innerY + 5, Math.floor(active.y - 8 + bob));
+      const topY = tipY - 8;
+      this.graphics.fillStyle(0xff1f1f, alpha);
+      this.graphics.fillTriangle(active.x - 5, topY, active.x + 5, topY, active.x, tipY);
+      this.graphics.lineStyle(1, 0x4a0000, Math.min(1, alpha + 0.1));
+      this.graphics.strokeTriangle(active.x - 5, topY, active.x + 5, topY, active.x, tipY);
+    }
     if (active) {
       const weapon = getWeaponById(active.selectedWeaponId);
       const iconKey = this.weaponIconTextureKey(weapon.id);
