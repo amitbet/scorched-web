@@ -5,3 +5,6 @@ dist
 coverage
 /java/
 /shop-images/
+server/signal-go/web/*
+!server/signal-go/web/index.html
+server/signal-go/scorched-signal-go

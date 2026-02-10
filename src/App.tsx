@@ -3087,6 +3087,7 @@ export default function App(): JSX.Element {
             terrain: terrainRef.current,
             runtime: networkMode === 'client' && predictedRuntimeRef.current ? predictedRuntimeRef.current : runtimeRef.current,
             message,
+            localTurnNoticePlayerId: networkMode === 'offline' ? null : (lanSessionRef.current?.selfPeerId ?? null),
           })}
           onInputFrame={onBattleInputFrame}
         />

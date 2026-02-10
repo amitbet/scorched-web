@@ -60,7 +60,13 @@ interface BattleScreenProps {
   shieldMenuItems: Array<{ id: 'shield' | 'medium-shield' | 'heavy-shield'; name: string; count: number; boost: number }>;
   onCloseShieldMenu: () => void;
   onActivateShield: (shieldId: 'shield' | 'medium-shield' | 'heavy-shield') => void;
-  getSnapshot: () => { match: MatchState | null; terrain: TerrainState | null; runtime: BattleRuntimeSnapshot; message: string };
+  getSnapshot: () => {
+    match: MatchState | null;
+    terrain: TerrainState | null;
+    runtime: BattleRuntimeSnapshot;
+    message: string;
+    localTurnNoticePlayerId: string | null;
+  };
   onInputFrame: (input: BattleInputState, deltaMs: number) => void;
 }
 
@@ -77,6 +83,7 @@ class BattleScene extends Phaser.Scene {
   private hudWeaponLabelText!: Phaser.GameObjects.Text;
   private hudWeaponValueText!: Phaser.GameObjects.Text;
   private noteText!: Phaser.GameObjects.Text;
+  private turnNoticeText!: Phaser.GameObjects.Text;
   private keys!: {
     a: Phaser.Input.Keyboard.Key;
     d: Phaser.Input.Keyboard.Key;
@@ -107,6 +114,8 @@ class BattleScene extends Phaser.Scene {
   private prevActivePlayerId: string | null = null;
   private turnIndicatorStartMs = 0;
   private turnIndicatorEndMs = 0;
+  private turnNoticeStartMs = 0;
+  private turnNoticeEndMs = 0;
 
   private getPowerBarRect(width: number): { x: number; y: number; w: number; h: number } {
     return { x: Math.max(300, width - 180), y: 4, w: 150, h: 10 };
@@ -160,6 +169,17 @@ class BattleScene extends Phaser.Scene {
     this.hudWeaponValueText.setDepth(4);
     this.noteText = this.add.text(8, 22, '', { fontFamily: 'Courier New', fontSize: '12px', color: '#111111' });
     this.noteText.setDepth(4);
+    this.turnNoticeText = this.add.text(0, 0, 'YOUR TURN', {
+      fontFamily: 'Courier New',
+      fontSize: '34px',
+      color: '#ff2a2a',
+      fontStyle: 'bold',
+      stroke: '#2b0000',
+      strokeThickness: 4,
+    });
+    this.turnNoticeText.setOrigin(0.5, 0.5);
+    this.turnNoticeText.setDepth(5);
+    this.turnNoticeText.setVisible(false);
 
     const input = this.input.keyboard;
     if (!input) {
@@ -229,8 +249,11 @@ class BattleScene extends Phaser.Scene {
       this.prevActivePlayerId = null;
       this.turnIndicatorStartMs = 0;
       this.turnIndicatorEndMs = 0;
+      this.turnNoticeStartMs = 0;
+      this.turnNoticeEndMs = 0;
       this.backgroundGraphics.clear();
       this.graphics.clear();
+      this.turnNoticeText.setVisible(false);
       this.backgroundGraphics.fillStyle(0x090c2b, 1);
       this.backgroundGraphics.fillRect(0, 0, this.scale.width, this.scale.height);
       if (this.terrainImage) {
@@ -281,11 +304,11 @@ class BattleScene extends Phaser.Scene {
       }
     }
 
-    this.updateTurnIndicator(snapshot.match);
+    this.updateTurnIndicator(snapshot.match, snapshot.localTurnNoticePlayerId);
     this.renderFrame(snapshot.match, snapshot.terrain, snapshot.runtime, snapshot.message);
   }
 
-  private updateTurnIndicator(match: MatchState): void {
+  private updateTurnIndicator(match: MatchState, localTurnNoticePlayerId: string | null): void {
     const now = this.time.now;
     const enteredAimPhase = match.phase === 'aim' && this.prevPhase !== 'aim';
     const changedActivePlayer = match.phase === 'aim' && this.prevActivePlayerId !== null && match.activePlayerId !== this.prevActivePlayerId;
@@ -293,6 +316,12 @@ class BattleScene extends Phaser.Scene {
     if (enteredAimPhase || changedActivePlayer || firstAimFrame) {
       this.turnIndicatorStartMs = now;
       this.turnIndicatorEndMs = now + 1600;
+      const localTurnOnly = localTurnNoticePlayerId !== null;
+      const shouldShowTurnNotice = localTurnOnly && match.activePlayerId === localTurnNoticePlayerId;
+      if (shouldShowTurnNotice) {
+        this.turnNoticeStartMs = now;
+        this.turnNoticeEndMs = now + 1300;
+      }
     }
     this.prevPhase = match.phase;
     this.prevActivePlayerId = match.activePlayerId;
@@ -840,6 +869,20 @@ class BattleScene extends Phaser.Scene {
     this.graphics.lineStyle(1, 0xdadada, 1);
     this.graphics.strokeRect(1.5, 1.5, match.width - 3, match.height - 3);
     this.graphics.strokeRect(innerX - 0.5, innerY - 0.5, innerW + 1, innerH + 1);
+
+    const now = this.time.now;
+    if (now < this.turnNoticeEndMs) {
+      const durationMs = Math.max(1, this.turnNoticeEndMs - this.turnNoticeStartMs);
+      const elapsed = Phaser.Math.Clamp((now - this.turnNoticeStartMs) / durationMs, 0, 1);
+      const pulse = 0.75 + Math.abs(Math.sin(elapsed * Math.PI * 5)) * 0.25;
+      const fade = 1 - elapsed * 0.8;
+      this.turnNoticeText.setPosition(match.width * 0.5, innerY + innerH * 0.26);
+      this.turnNoticeText.setScale(1 + (1 - elapsed) * 0.22);
+      this.turnNoticeText.setAlpha(Phaser.Math.Clamp(pulse * fade, 0.08, 1));
+      this.turnNoticeText.setVisible(true);
+    } else {
+      this.turnNoticeText.setVisible(false);
+    }
 
     const active = match.players.find((p) => p.config.id === match.activePlayerId);
     if (active && this.time.now < this.turnIndicatorEndMs) {
