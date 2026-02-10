@@ -4,6 +4,7 @@ import { SettingsScreen } from './screens/SettingsScreen';
 import { PlayersScreen } from './screens/PlayersScreen';
 import { ShopScreen } from './screens/ShopScreen';
 import { BattleScreen, type BattleInputState } from './screens/BattleScreen';
+import { LanScreen, type LanMatchSession } from './screens/LanScreen';
 import { DEFAULT_SETTINGS, type GameSettings, type MatchState, type PlayerConfig, type PlayerState, type ProjectileState, type TerrainState } from './types/game';
 import { loadProfile, saveProfile } from './utils/storage';
 import { buyWeapon, sellWeapon } from './game/Economy';
@@ -17,8 +18,11 @@ import { pickRandomMtn, preloadMtnTerrains } from './engine/terrain/MtnTerrain';
 import { computeExplosionDamage } from './game/Combat';
 import { getWeaponRuntimeSpec } from './game/weapons/runtimeSpecs';
 import { SHIELD_ITEMS, activateShieldFromInventory, autoActivateShieldAtRoundStart } from './game/Shield';
+import { decodeTerrain, encodeTerrain } from './net/stateCodec';
+import type { GameInputPayload, GameSnapshotPayload } from './net/protocol';
+import { SignalClient } from './net/signalingClient';
 
-type Screen = 'title' | 'settings' | 'players' | 'shop' | 'battle' | 'matchEnd';
+type Screen = 'title' | 'settings' | 'players' | 'shop' | 'battle' | 'matchEnd' | 'lan';
 
 interface RuntimeState {
   projectiles: ProjectileState[];
@@ -72,6 +76,15 @@ interface RuntimeState {
   };
 }
 
+type NetworkMode = 'offline' | 'host' | 'client';
+
+interface LanSessionState {
+  client: SignalClient;
+  roomId: string;
+  selfPeerId: string;
+  isHost: boolean;
+}
+
 function makeDefaultPlayers(): PlayerConfig[] {
   return Array.from({ length: 8 }).map((_, idx) => ({
     id: `p${idx + 1}`,
@@ -81,6 +94,20 @@ function makeDefaultPlayers(): PlayerConfig[] {
     colorIndex: idx,
     enabled: idx < 2,
   }));
+}
+
+function loadInitialAppState(): { settings: GameSettings; players: PlayerConfig[] } {
+  const profile = loadProfile();
+  if (!profile) {
+    return {
+      settings: normalizeSettings(DEFAULT_SETTINGS),
+      players: makeDefaultPlayers(),
+    };
+  }
+  return {
+    settings: normalizeSettings(profile.settings),
+    players: profile.players,
+  };
 }
 
 function pickNextWeapon(player: PlayerState, delta: number, freeFireMode = false): string {
@@ -454,15 +481,19 @@ function spawnFunkyChildren(parent: ProjectileState, count: number): ProjectileS
 }
 
 export default function App(): JSX.Element {
+  const initialAppStateRef = useRef(loadInitialAppState());
   const [screen, setScreen] = useState<Screen>('title');
-  const [settings, setSettings] = useState(normalizeSettings(DEFAULT_SETTINGS));
-  const [playerConfigs, setPlayerConfigs] = useState<PlayerConfig[]>(makeDefaultPlayers);
+  const [settings, setSettings] = useState(initialAppStateRef.current.settings);
+  const [playerConfigs, setPlayerConfigs] = useState<PlayerConfig[]>(initialAppStateRef.current.players);
   const [match, setMatch] = useState<MatchState | null>(null);
   const [terrain, setTerrain] = useState<TerrainState | null>(null);
   const [shopIndex, setShopIndex] = useState(0);
   const [message, setMessage] = useState('');
   const [winnerName, setWinnerName] = useState('');
   const [shieldMenuOpen, setShieldMenuOpen] = useState(false);
+  const [lanEntryMode, setLanEntryMode] = useState<'host' | 'join'>('host');
+  const [networkMode, setNetworkMode] = useState<NetworkMode>('offline');
+  const [shopDoneByPlayerId, setShopDoneByPlayerId] = useState<Record<string, boolean>>({});
 
   const runtimeRef = useRef<RuntimeState>({
     projectiles: [],
@@ -482,6 +513,15 @@ export default function App(): JSX.Element {
   const powerTickAccumulatorRef = useRef(0);
   const angleTickAccumulatorRef = useRef(0);
   const movementTickAccumulatorRef = useRef(0);
+  const lanSessionRef = useRef<LanSessionState | null>(null);
+  const remoteInputQueueRef = useRef<Array<{ peerId: string; payload: GameInputPayload }>>([]);
+  const networkTickRef = useRef(0);
+  const lastBroadcastTerrainRevisionRef = useRef<number>(-1);
+  const lastBroadcastTerrainRef = useRef<TerrainState | null>(null);
+  const lastBroadcastAtRef = useRef<number>(0);
+  const lastBroadcastViewRef = useRef<'shop' | 'battle' | ''>('');
+  const shopDoneByPlayerIdRef = useRef<Record<string, boolean>>({});
+  const screenRef = useRef<Screen>('title');
 
   useEffect(() => {
     matchRef.current = match;
@@ -490,6 +530,14 @@ export default function App(): JSX.Element {
   useEffect(() => {
     terrainRef.current = terrain;
   }, [terrain]);
+
+  useEffect(() => {
+    shopDoneByPlayerIdRef.current = shopDoneByPlayerId;
+  }, [shopDoneByPlayerId]);
+
+  useEffect(() => {
+    screenRef.current = screen;
+  }, [screen]);
 
   useEffect(() => {
     void preloadMtnTerrains().catch(() => {
@@ -517,6 +565,77 @@ export default function App(): JSX.Element {
     }
     setShopIndex((idx) => clamp(idx, 0, match.players.length - 1));
   }, [screen, match]);
+
+  const resetRuntime = useCallback(() => {
+    runtimeRef.current = {
+      projectiles: [],
+      explosions: [],
+      trails: [],
+      terrainEdits: [],
+      deferredSettlePending: false,
+      funkySequence: null,
+      mirvSequence: null,
+    };
+  }, []);
+
+  const setShopDoneState = useCallback((next: Record<string, boolean>) => {
+    shopDoneByPlayerIdRef.current = next;
+    setShopDoneByPlayerId(next);
+  }, []);
+
+  const markShopDone = useCallback((playerId: string, done: boolean) => {
+    const next = { ...shopDoneByPlayerIdRef.current, [playerId]: done };
+    setShopDoneState(next);
+    return next;
+  }, [setShopDoneState]);
+
+  const allPlayersShopDone = useCallback((players: PlayerState[], doneMap: Record<string, boolean>): boolean => {
+    if (players.length === 0) {
+      return false;
+    }
+    return players.every((p) => doneMap[p.config.id] === true);
+  }, []);
+
+  const pushHostSnapshot = useCallback((forceTerrain = false, viewOverride?: 'shop' | 'battle') => {
+    const session = lanSessionRef.current;
+    if (!session || session.isHost !== true) {
+      return;
+    }
+    const currentMatch = matchRef.current;
+    const currentTerrain = terrainRef.current;
+    if (!currentMatch || !currentTerrain) {
+      return;
+    }
+    const snapshotView = viewOverride ?? (screen === 'shop' ? 'shop' : 'battle');
+    const now = Date.now();
+    const periodicTerrainSyncDue = now - lastBroadcastAtRef.current >= 2000;
+    const terrainObjectChanged = lastBroadcastTerrainRef.current !== currentTerrain;
+    const viewChanged = lastBroadcastViewRef.current !== snapshotView;
+    const includeTerrain =
+      forceTerrain
+      || terrainObjectChanged
+      || viewChanged
+      || lastBroadcastTerrainRevisionRef.current !== currentTerrain.revision
+      || periodicTerrainSyncDue;
+    const payload: GameSnapshotPayload = {
+      roomId: session.roomId,
+      tick: networkTickRef.current++,
+      view: snapshotView,
+      shopIndex,
+      shopDoneByPlayerId: shopDoneByPlayerIdRef.current,
+      match: currentMatch,
+      runtime: runtimeRef.current,
+      message,
+      terrain: includeTerrain ? encodeTerrain(currentTerrain) : undefined,
+    };
+    if (includeTerrain) {
+      lastBroadcastTerrainRevisionRef.current = currentTerrain.revision;
+      lastBroadcastTerrainRef.current = currentTerrain;
+      lastBroadcastAtRef.current = now;
+    }
+    lastBroadcastViewRef.current = snapshotView;
+    session.client.sendGameSnapshot(payload);
+  }, [message, screen, shopIndex]);
 
   const makeTerrainForRound = useCallback(async (
     width: number,
@@ -2101,21 +2220,18 @@ export default function App(): JSX.Element {
           const regenerated = generated.terrain;
           const placed = placePlayersOnTerrain(postRound, regenerated);
           const reseated = placed.match;
-          runtimeRef.current = {
-            projectiles: [],
-            explosions: [],
-            trails: [],
-            terrainEdits: [],
-            deferredSettlePending: false,
-            funkySequence: null,
-            mirvSequence: null,
-          };
+          resetRuntime();
           matchRef.current = reseated;
           terrainRef.current = placed.terrain;
           setMatch(reseated);
           setTerrain(placed.terrain);
-          setShopIndex(0);
-          setScreen('shop');
+          if (networkMode === 'host') {
+            setScreen('battle');
+            pushHostSnapshot(true, 'battle');
+          } else {
+            setShopIndex(0);
+            setScreen('shop');
+          }
         })();
       }
       return;
@@ -2136,10 +2252,13 @@ export default function App(): JSX.Element {
 
     matchRef.current = nextMatch;
     terrainRef.current = nextTerrain;
-  }, [makeTerrainForRound, placePlayersOnTerrain]);
+  }, [makeTerrainForRound, networkMode, placePlayersOnTerrain, pushHostSnapshot, resetRuntime]);
 
   useEffect(() => {
     if (!match || !terrain || screen !== 'battle') {
+      return;
+    }
+    if (networkMode === 'client') {
       return;
     }
     const active = match.players.find((p) => p.config.id === match.activePlayerId);
@@ -2178,10 +2297,27 @@ export default function App(): JSX.Element {
         window.clearTimeout(aiFireTimeout.current);
       }
     };
-  }, [fireWeapon, match, terrain, screen]);
+  }, [fireWeapon, match, terrain, screen, networkMode]);
 
   const onBattleInputFrame = useCallback((input: BattleInputState, deltaMs: number) => {
     if (screen !== 'battle') {
+      return;
+    }
+    const session = lanSessionRef.current;
+    if (networkMode === 'client') {
+      const currentMatch = matchRef.current;
+      if (!session || !currentMatch) {
+        return;
+      }
+      const active = currentMatch.players.find((p) => p.config.id === currentMatch.activePlayerId);
+      if (!active || active.config.id !== session.selfPeerId || active.config.kind !== 'human') {
+        return;
+      }
+      session.client.sendGameInput({
+        roomId: session.roomId,
+        input,
+        deltaMs,
+      });
       return;
     }
     const currentTerrain = terrainRef.current;
@@ -2190,11 +2326,41 @@ export default function App(): JSX.Element {
       return;
     }
     let liveMatch: MatchState = currentMatch;
+    let controlInput = input;
+
+    if (networkMode === 'host' && session) {
+      const active = liveMatch.players.find((p) => p.config.id === liveMatch.activePlayerId);
+      if (active && active.config.kind === 'human' && active.config.id !== session.selfPeerId) {
+        const queue = remoteInputQueueRef.current;
+        const index = queue.map((entry) => entry.peerId).lastIndexOf(active.config.id);
+        if (index >= 0) {
+          const entry = queue[index];
+          controlInput = entry.payload.input;
+          queue.splice(index, 1);
+        } else {
+          controlInput = {
+            moveLeft: false,
+            moveRight: false,
+            alt: false,
+            left: false,
+            right: false,
+            up: false,
+            down: false,
+            fastUp: false,
+            fastDown: false,
+            firePressed: false,
+            weaponCycle: 0,
+            toggleShieldMenu: false,
+            powerSet: null,
+          };
+        }
+      }
+    }
 
     if (liveMatch.phase === 'aim') {
       const active = liveMatch.players.find((p) => p.config.id === liveMatch.activePlayerId);
       if (active?.config.kind === 'human') {
-        if (input.toggleShieldMenu) {
+        if (controlInput.toggleShieldMenu) {
           setShieldMenuOpen((open) => !open);
         }
 
@@ -2203,17 +2369,17 @@ export default function App(): JSX.Element {
           return;
         }
 
-        if (input.weaponCycle !== 0) {
-          const updated = { ...active, selectedWeaponId: pickNextWeapon(active, input.weaponCycle, liveMatch.settings.freeFireMode) };
+        if (controlInput.weaponCycle !== 0) {
+          const updated = { ...active, selectedWeaponId: pickNextWeapon(active, controlInput.weaponCycle, liveMatch.settings.freeFireMode) };
           liveMatch = updatePlayer(liveMatch, updated);
           matchRef.current = liveMatch;
         }
 
-        if (input.firePressed) {
+        if (controlInput.firePressed) {
           fireWeapon(liveMatch, active);
           liveMatch = matchRef.current ?? liveMatch;
         } else {
-          const aimed = applyHeldAimInput(liveMatch, currentTerrain, input, Math.min(250, deltaMs) / 1000);
+          const aimed = applyHeldAimInput(liveMatch, currentTerrain, controlInput, Math.min(250, deltaMs) / 1000);
           if (aimed !== liveMatch) {
             liveMatch = aimed;
             matchRef.current = aimed;
@@ -2241,9 +2407,12 @@ export default function App(): JSX.Element {
       if (terrainRef.current) {
         setTerrain(terrainRef.current);
       }
+      if (networkMode === 'host') {
+        pushHostSnapshot(false);
+      }
       uiSyncAccumulatorRef.current = 0;
     }
-  }, [applyHeldAimInput, fireWeapon, screen, shieldMenuOpen, stepSimulation]);
+  }, [applyHeldAimInput, fireWeapon, networkMode, pushHostSnapshot, screen, shieldMenuOpen, stepSimulation]);
 
   const startShopToBattle = useCallback(async (existingMatch: MatchState) => {
     const generated = await makeTerrainForRound(
@@ -2271,15 +2440,7 @@ export default function App(): JSX.Element {
     matchRef.current = next;
     setTerrain(placed.terrain);
     setMatch(next);
-    runtimeRef.current = {
-      projectiles: [],
-      explosions: [],
-      trails: [],
-      terrainEdits: [],
-      deferredSettlePending: false,
-      funkySequence: null,
-      mirvSequence: null,
-    };
+    resetRuntime();
     simulationAccumulatorRef.current = 0;
     uiSyncAccumulatorRef.current = 0;
     powerTickAccumulatorRef.current = 0;
@@ -2287,7 +2448,11 @@ export default function App(): JSX.Element {
     movementTickAccumulatorRef.current = 0;
     setScreen('battle');
     setMessage(`Terrain: ${generated.source}`);
-  }, [makeTerrainForRound, placePlayersOnTerrain]);
+    setShopDoneState({});
+    if (networkMode === 'host') {
+      pushHostSnapshot(true, 'battle');
+    }
+  }, [makeTerrainForRound, networkMode, placePlayersOnTerrain, pushHostSnapshot, resetRuntime, setShopDoneState]);
 
   const useShieldFromPopup = useCallback((shieldId: 'shield' | 'medium-shield' | 'heavy-shield') => {
     const liveMatch = matchRef.current;
@@ -2310,8 +2475,182 @@ export default function App(): JSX.Element {
     setMessage(`${active.config.name} activated ${shieldId}`);
   }, []);
 
+  const handleLanMatchStart = useCallback((session: LanMatchSession) => {
+    const self = session.room.players.find((player) => player.peerId === session.selfPeerId);
+    if (!self) {
+      setMessage('LAN session error: local player not found in room');
+      setScreen('title');
+      return;
+    }
+
+    const isHost = self.isHost;
+    lanSessionRef.current = {
+      client: session.client,
+      roomId: session.roomId,
+      selfPeerId: session.selfPeerId,
+      isHost,
+    };
+    setNetworkMode(isHost ? 'host' : 'client');
+
+    session.client.setHandlers({
+      onGameInput: (peerId, payload) => {
+        if (!lanSessionRef.current?.isHost) {
+          return;
+        }
+        remoteInputQueueRef.current.push({ peerId, payload });
+      },
+      onShopBuy: (peerId, roomId, weaponId) => {
+        const liveSession = lanSessionRef.current;
+        if (!liveSession || !liveSession.isHost || roomId !== liveSession.roomId || screenRef.current !== 'shop') {
+          return;
+        }
+        const liveMatch = matchRef.current;
+        if (!liveMatch) {
+          return;
+        }
+        if (shopDoneByPlayerIdRef.current[peerId]) {
+          return;
+        }
+        const updated = {
+          ...liveMatch,
+          players: liveMatch.players.map((p) => (p.config.id === peerId ? buyWeapon(p, weaponId) : p)),
+        };
+        matchRef.current = updated;
+        setMatch(updated);
+        pushHostSnapshot(false, 'shop');
+      },
+      onShopSell: (peerId, roomId, weaponId) => {
+        const liveSession = lanSessionRef.current;
+        if (!liveSession || !liveSession.isHost || roomId !== liveSession.roomId || screenRef.current !== 'shop') {
+          return;
+        }
+        const liveMatch = matchRef.current;
+        if (!liveMatch) {
+          return;
+        }
+        if (shopDoneByPlayerIdRef.current[peerId]) {
+          return;
+        }
+        const updated = {
+          ...liveMatch,
+          players: liveMatch.players.map((p) => (p.config.id === peerId ? sellWeapon(p, weaponId) : p)),
+        };
+        matchRef.current = updated;
+        setMatch(updated);
+        pushHostSnapshot(false, 'shop');
+      },
+      onShopDone: (peerId, roomId, done) => {
+        const liveSession = lanSessionRef.current;
+        if (!liveSession || !liveSession.isHost || roomId !== liveSession.roomId || screenRef.current !== 'shop') {
+          return;
+        }
+        const nextDone = markShopDone(peerId, done);
+        const liveMatch = matchRef.current;
+        if (!liveMatch) {
+          return;
+        }
+        pushHostSnapshot(false, 'shop');
+        if (allPlayersShopDone(liveMatch.players, nextDone)) {
+          void startShopToBattle(liveMatch);
+        }
+      },
+      onGameSnapshot: (payload) => {
+        const liveSession = lanSessionRef.current;
+        if (!liveSession || liveSession.isHost || payload.roomId !== liveSession.roomId) {
+          return;
+        }
+        if (payload.view) {
+          setScreen(payload.view);
+        }
+        if (typeof payload.shopIndex === 'number') {
+          setShopIndex(payload.shopIndex);
+        }
+        if (payload.shopDoneByPlayerId) {
+          setShopDoneState(payload.shopDoneByPlayerId);
+        }
+        const nextMatch = payload.match as MatchState;
+        const nextRuntime = payload.runtime as RuntimeState;
+        matchRef.current = nextMatch;
+        runtimeRef.current = nextRuntime;
+        setMatch(nextMatch);
+        setMessage(payload.message);
+        if (payload.terrain) {
+          const decoded = decodeTerrain(payload.terrain);
+          terrainRef.current = decoded;
+          setTerrain(decoded);
+        }
+      },
+      onError: (text) => {
+        setMessage(text);
+      },
+    });
+
+    if (isHost) {
+      const lanPlayers: PlayerConfig[] = session.room.players.map((player, idx) => ({
+        id: player.peerId,
+        name: player.name,
+        kind: 'human',
+        aiLevel: 'normal',
+        colorIndex: idx % 8,
+        enabled: true,
+      }));
+      const seeded = initMatch(settings, lanPlayers, window.innerWidth, window.innerHeight);
+      const nextMatch = {
+        ...seeded.match,
+        activePlayerId: lanPlayers[0].id,
+      };
+      matchRef.current = nextMatch;
+      terrainRef.current = seeded.terrain;
+      setMatch(nextMatch);
+      setTerrain(seeded.terrain);
+      setMessage('LAN match started');
+      resetRuntime();
+      const initialDone: Record<string, boolean> = {};
+      for (const p of lanPlayers) {
+        initialDone[p.id] = false;
+      }
+      setShopDoneState(initialDone);
+      simulationAccumulatorRef.current = 0;
+      uiSyncAccumulatorRef.current = 0;
+      lastBroadcastTerrainRevisionRef.current = -1;
+      lastBroadcastTerrainRef.current = null;
+      lastBroadcastAtRef.current = 0;
+      lastBroadcastViewRef.current = '';
+      setShopIndex(0);
+      setScreen('shop');
+      pushHostSnapshot(true, 'shop');
+      return;
+    }
+
+    resetRuntime();
+    setShopDoneState({});
+    setMatch(null);
+    setTerrain(null);
+    setMessage('Waiting for host state snapshot...');
+    setScreen('battle');
+  }, [allPlayersShopDone, markShopDone, pushHostSnapshot, resetRuntime, setShopDoneState, settings, startShopToBattle]);
+
+  const clearLanSession = useCallback(() => {
+    const live = lanSessionRef.current;
+    if (live) {
+      live.client.disconnect();
+    }
+    lanSessionRef.current = null;
+    remoteInputQueueRef.current = [];
+    lastBroadcastTerrainRevisionRef.current = -1;
+    lastBroadcastTerrainRef.current = null;
+    lastBroadcastAtRef.current = 0;
+    lastBroadcastViewRef.current = '';
+    setShopDoneState({});
+    setNetworkMode('offline');
+  }, [setShopDoneState]);
+
   const activeShopPlayer = match?.players[shopIndex] ?? match?.players[0] ?? null;
   const activeBattlePlayer = match?.players.find((p) => p.config.id === match.activePlayerId);
+  const localLanPlayerId = lanSessionRef.current?.selfPeerId ?? '';
+  const localLanShopPlayer = match?.players.find((p) => p.config.id === localLanPlayerId) ?? null;
+  const localLanShopDone = localLanPlayerId ? Boolean(shopDoneByPlayerId[localLanPlayerId]) : false;
+  const allLanShopDone = match ? allPlayersShopDone(match.players, shopDoneByPlayerId) : false;
   const shieldMenuItems = activeBattlePlayer
     ? SHIELD_ITEMS.map((item) => ({
       ...item,
@@ -2323,18 +2662,29 @@ export default function App(): JSX.Element {
     <div className={`app ${screen === 'battle' ? 'battle-mode' : ''}`}>
       {screen === 'title' && (
         <TitleScreen
-          onStart={() => setScreen('players')}
-          onSettings={() => setScreen('settings')}
-          onLoad={() => {
-            const profile = loadProfile();
-            if (profile) {
-              setSettings(normalizeSettings(profile.settings));
-              setPlayerConfigs(profile.players);
-              setMessage('Loaded profile');
-            } else {
-              setMessage('No saved profile found');
-            }
+          onStartLocal={() => {
+            clearLanSession();
+            setScreen('players');
           }}
+          onHostLan={() => {
+            clearLanSession();
+            setLanEntryMode('host');
+            setScreen('lan');
+          }}
+          onJoinLan={() => {
+            clearLanSession();
+            setLanEntryMode('join');
+            setScreen('lan');
+          }}
+          onSettings={() => setScreen('settings')}
+        />
+      )}
+
+      {screen === 'lan' && (
+        <LanScreen
+          initialMode={lanEntryMode}
+          onBack={() => setScreen('title')}
+          onMatchStart={handleLanMatchStart}
         />
       )}
 
@@ -2374,6 +2724,7 @@ export default function App(): JSX.Element {
             setMatch(placed.match);
             setTerrain(placed.terrain);
             setShopIndex(0);
+            setShopDoneState({});
             setScreen('shop');
             setMessage(`Terrain ready: ${generated.source}`);
           }}
@@ -2381,38 +2732,154 @@ export default function App(): JSX.Element {
       )}
 
       {screen === 'shop' && match && (
-        <ShopScreen
-          players={match.players}
-          currentIndex={activeShopPlayer ? match.players.findIndex((p) => p.config.id === activeShopPlayer.config.id) : 0}
-          onBuy={(playerId, weaponId) => {
-            setMatch((current) => {
-              if (!current) {
-                return null;
-              }
-              return {
-                ...current,
-                players: current.players.map((p) => (p.config.id === playerId ? buyWeapon(p, weaponId) : p)),
-              };
-            });
-          }}
-          onSell={(playerId, weaponId) => {
-            setMatch((current) => {
-              if (!current) {
-                return null;
-              }
-              return {
-                ...current,
-                players: current.players.map((p) => (p.config.id === playerId ? sellWeapon(p, weaponId) : p)),
-              };
-            });
-          }}
-          onNext={() => setShopIndex((idx) => clamp(idx + 1, 0, (match?.players.length ?? 1) - 1))}
-          onDone={() => {
-            if (match) {
-              void startShopToBattle(match);
-            }
-          }}
-        />
+        <>
+          {networkMode === 'host' || networkMode === 'client' ? (
+            <>
+              {localLanShopPlayer && (
+                <ShopScreen
+                  players={[localLanShopPlayer]}
+                  currentIndex={0}
+                  actionsDisabled={localLanShopDone}
+                  doneLabel={localLanShopDone ? 'Done' : 'Done Shopping'}
+                  onBuy={(playerId, weaponId) => {
+                    if (localLanShopDone) {
+                      return;
+                    }
+                    if (networkMode === 'host') {
+                      setMatch((current) => {
+                        if (!current) {
+                          return null;
+                        }
+                        const next = {
+                          ...current,
+                          players: current.players.map((p) => (p.config.id === playerId ? buyWeapon(p, weaponId) : p)),
+                        };
+                        matchRef.current = next;
+                        pushHostSnapshot(false, 'shop');
+                        return next;
+                      });
+                      return;
+                    }
+                    const session = lanSessionRef.current;
+                    if (session) {
+                      session.client.sendShopBuy(session.roomId, weaponId);
+                    }
+                  }}
+                  onSell={(playerId, weaponId) => {
+                    if (localLanShopDone) {
+                      return;
+                    }
+                    if (networkMode === 'host') {
+                      setMatch((current) => {
+                        if (!current) {
+                          return null;
+                        }
+                        const next = {
+                          ...current,
+                          players: current.players.map((p) => (p.config.id === playerId ? sellWeapon(p, weaponId) : p)),
+                        };
+                        matchRef.current = next;
+                        pushHostSnapshot(false, 'shop');
+                        return next;
+                      });
+                      return;
+                    }
+                    const session = lanSessionRef.current;
+                    if (session) {
+                      session.client.sendShopSell(session.roomId, weaponId);
+                    }
+                  }}
+                  onNext={() => {}}
+                  onDone={() => {
+                    const session = lanSessionRef.current;
+                    if (!session || !localLanPlayerId) {
+                      return;
+                    }
+                    if (networkMode === 'host') {
+                      const nextDone = markShopDone(localLanPlayerId, true);
+                      pushHostSnapshot(false, 'shop');
+                      if (allPlayersShopDone(match.players, nextDone)) {
+                        void startShopToBattle(match);
+                      }
+                    } else {
+                      markShopDone(localLanPlayerId, true);
+                      session.client.sendShopDone(session.roomId, true);
+                    }
+                  }}
+                />
+              )}
+              {localLanShopDone && (
+                <div className="screen panel">
+                  <h3>Shopping Status</h3>
+                  <ul>
+                    {match.players.map((p) => (
+                      <li key={p.config.id}>
+                        {p.config.name}: {shopDoneByPlayerId[p.config.id] ? 'Done' : 'Shopping'}
+                      </li>
+                    ))}
+                  </ul>
+                  {!allLanShopDone && (
+                    <p>Waiting for all players to finish...</p>
+                  )}
+                  {networkMode === 'host' && (
+                    <div className="row">
+                      <button
+                        onClick={() => {
+                          void startShopToBattle(match);
+                        }}
+                        disabled={allLanShopDone}
+                      >
+                        Start Anyway
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </>
+          ) : (
+            <ShopScreen
+              players={match.players}
+              currentIndex={activeShopPlayer ? match.players.findIndex((p) => p.config.id === activeShopPlayer.config.id) : 0}
+              onBuy={(playerId, weaponId) => {
+                setMatch((current) => {
+                  if (!current) {
+                    return null;
+                  }
+                  const next = {
+                    ...current,
+                    players: current.players.map((p) => (p.config.id === playerId ? buyWeapon(p, weaponId) : p)),
+                  };
+                  matchRef.current = next;
+                  return next;
+                });
+              }}
+              onSell={(playerId, weaponId) => {
+                setMatch((current) => {
+                  if (!current) {
+                    return null;
+                  }
+                  const next = {
+                    ...current,
+                    players: current.players.map((p) => (p.config.id === playerId ? sellWeapon(p, weaponId) : p)),
+                  };
+                  matchRef.current = next;
+                  return next;
+                });
+              }}
+              onNext={() => {
+                setShopIndex((idx) => {
+                  const nextIdx = clamp(idx + 1, 0, (match?.players.length ?? 1) - 1);
+                  return nextIdx;
+                });
+              }}
+              onDone={() => {
+                if (match) {
+                  void startShopToBattle(match);
+                }
+              }}
+            />
+          )}
+        </>
       )}
 
       {screen === 'battle' && match && terrain && (
@@ -2435,6 +2902,22 @@ export default function App(): JSX.Element {
         />
       )}
 
+      {screen === 'battle' && (!match || !terrain) && (
+        <div className="screen panel end-screen">
+          <h2>Connecting To Host Match</h2>
+          <p>{message || 'Waiting for synchronized game state...'}</p>
+          <div className="row">
+            <button onClick={() => {
+              clearLanSession();
+              setScreen('title');
+            }}
+            >
+              Leave LAN Match
+            </button>
+          </div>
+        </div>
+      )}
+
       {screen === 'matchEnd' && match && (
         <div className="screen panel end-screen">
           <h2>Match Winner: {winnerName}</h2>
@@ -2449,8 +2932,20 @@ export default function App(): JSX.Element {
               ))}
           </ul>
           <div className="row">
-            <button onClick={() => setScreen('players')}>New Match</button>
-            <button onClick={() => setScreen('title')}>Title</button>
+            <button onClick={() => {
+              clearLanSession();
+              setScreen('players');
+            }}
+            >
+              New Match
+            </button>
+            <button onClick={() => {
+              clearLanSession();
+              setScreen('title');
+            }}
+            >
+              Title
+            </button>
           </div>
         </div>
       )}

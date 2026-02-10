@@ -11,9 +11,11 @@ interface ShopScreenProps {
   onSell: (playerId: string, weaponId: string) => void;
   onNext: () => void;
   onDone: () => void;
+  actionsDisabled?: boolean;
+  doneLabel?: string;
 }
 
-export function ShopScreen({ players, currentIndex, onBuy, onSell, onNext, onDone }: ShopScreenProps): JSX.Element {
+export function ShopScreen({ players, currentIndex, onBuy, onSell, onNext, onDone, actionsDisabled = false, doneLabel = 'Confirm Order' }: ShopScreenProps): JSX.Element {
   const safeIndex = Math.max(0, Math.min(currentIndex, Math.max(0, players.length - 1)));
   const player = players[safeIndex];
   const isLast = safeIndex === players.length - 1;
@@ -47,8 +49,8 @@ export function ShopScreen({ players, currentIndex, onBuy, onSell, onNext, onDon
       <div className="shop-grid">
         {filtered.map((weapon) => {
           const qty = player.inventory[weapon.id] ?? 0;
-          const buyAllowed = canBuy(player, weapon.id);
-          const sellAllowed = qty >= weapon.packQty;
+          const buyAllowed = !actionsDisabled && canBuy(player, weapon.id);
+          const sellAllowed = !actionsDisabled && qty >= weapon.packQty;
           return (
             <div className="weapon-row" key={weapon.id}>
               <img className="weapon-icon" src={getWeaponIcon(weapon.id)} alt={`${weapon.name} icon`} />
@@ -75,8 +77,8 @@ export function ShopScreen({ players, currentIndex, onBuy, onSell, onNext, onDon
         })}
       </div>
       <div className="row shop-actions">
-        {!isLast && <button onClick={onNext}>Next Player</button>}
-        {isLast && <button onClick={onDone}>Confirm Order</button>}
+        {!isLast && <button onClick={onNext} disabled={actionsDisabled}>Next Player</button>}
+        {isLast && <button onClick={onDone} disabled={actionsDisabled}>{doneLabel}</button>}
       </div>
     </div>
   );
