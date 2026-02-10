@@ -96,8 +96,8 @@ export class SignalClient {
     this.send('chat.msg', { roomId, text });
   }
 
-  startMatch(roomId: string): void {
-    this.send('match.start', { roomId });
+  startMatch(roomId: string, forceStart = false): void {
+    this.send('match.start', { roomId, forceStart });
   }
 
   sendGameInput(payload: GameInputPayload): void {

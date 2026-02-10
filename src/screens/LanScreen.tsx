@@ -81,6 +81,22 @@ export function LanScreen({ initialMode, onBack, onMatchStart }: LanScreenProps)
   }, [mode, roomState, busy, rooms.length, endpoint]);
 
   useEffect(() => {
+    if (mode !== 'join' || roomState) {
+      return;
+    }
+    if (rooms.length === 0) {
+      if (roomId) {
+        setRoomId('');
+      }
+      return;
+    }
+    const hasSelection = rooms.some((room) => room.roomId === roomId);
+    if (!hasSelection) {
+      setRoomId(rooms[0].roomId);
+    }
+  }, [mode, roomState, rooms, roomId]);
+
+  useEffect(() => {
     const self = roomState?.players.find((p) => p.peerId === selfPeerId);
     if (self) {
       if (renameDraft.trim().length === 0 || renameDraft === lastServerNameRef.current) {
@@ -292,12 +308,12 @@ export function LanScreen({ initialMode, onBack, onMatchStart }: LanScreenProps)
     }
   };
 
-  const startMatch = (): void => {
+  const startMatch = (forceStart = false): void => {
     if (!roomState) {
       return;
     }
     try {
-      clientRef.current?.startMatch(roomState.roomId);
+      clientRef.current?.startMatch(roomState.roomId, forceStart);
     } catch {
       setError('Not connected');
     }
@@ -387,7 +403,10 @@ export function LanScreen({ initialMode, onBack, onMatchStart }: LanScreenProps)
           <div className="row">
             <button onClick={toggleReady}>{self?.ready ? 'Unready' : 'Ready'}</button>
             {isHost && (
-              <button onClick={startMatch} disabled={readyCount < 2}>Start Match</button>
+              <button onClick={() => startMatch(false)} disabled={readyCount < 2}>Start Match</button>
+            )}
+            {isHost && (
+              <button onClick={() => startMatch(true)} disabled={roomState.players.length < 2}>Force Start</button>
             )}
             <button onClick={leaveRoom}>Leave Room</button>
           </div>

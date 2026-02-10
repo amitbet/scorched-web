@@ -91,6 +91,24 @@ interface ViewportSize {
   height: number;
 }
 
+const NETWORK_TERRAIN_SYNC_INTERVAL_MS = 250;
+const NETWORK_PERIODIC_TERRAIN_SYNC_MS = 2000;
+const HOST_UI_SYNC_INTERVAL_MS = 50;
+const DEFAULT_UI_SYNC_INTERVAL_MS = 80;
+const BATTLE_TERRAIN_WARMUP_SNAPSHOTS = 8;
+
+function cloneRuntimeState(runtime: RuntimeState): RuntimeState {
+  return {
+    projectiles: runtime.projectiles.map((p) => ({ ...p })),
+    explosions: runtime.explosions.map((e) => ({ ...e })),
+    trails: runtime.trails.map((t) => ({ ...t })),
+    terrainEdits: runtime.terrainEdits.map((edit) => ({ ...edit })),
+    deferredSettlePending: runtime.deferredSettlePending,
+    funkySequence: runtime.funkySequence ? { ...runtime.funkySequence } : null,
+    mirvSequence: runtime.mirvSequence ? { ...runtime.mirvSequence } : null,
+  };
+}
+
 function makeDefaultPlayers(): PlayerConfig[] {
   return Array.from({ length: 8 }).map((_, idx) => ({
     id: `p${idx + 1}`,
@@ -525,11 +543,16 @@ export default function App(): JSX.Element {
   const movementTickAccumulatorRef = useRef(0);
   const lanSessionRef = useRef<LanSessionState | null>(null);
   const remoteInputQueueRef = useRef<Array<{ peerId: string; payload: GameInputPayload }>>([]);
+  const predictedRuntimeRef = useRef<RuntimeState | null>(null);
+  const clientPredictionAccumulatorRef = useRef(0);
   const networkTickRef = useRef(0);
   const lastBroadcastTerrainRevisionRef = useRef<number>(-1);
   const lastBroadcastTerrainRef = useRef<TerrainState | null>(null);
   const lastBroadcastAtRef = useRef<number>(0);
   const lastBroadcastViewRef = useRef<'shop' | 'battle' | ''>('');
+  const battleTerrainWarmupRemainingRef = useRef(0);
+  const lastBroadcastPhaseRef = useRef<MatchState['phase'] | ''>('');
+  const lastBroadcastProjectileCountRef = useRef(0);
   const shopDoneByPlayerIdRef = useRef<Record<string, boolean>>({});
   const screenRef = useRef<Screen>('title');
 
@@ -597,6 +620,8 @@ export default function App(): JSX.Element {
       funkySequence: null,
       mirvSequence: null,
     };
+    predictedRuntimeRef.current = null;
+    clientPredictionAccumulatorRef.current = 0;
   }, []);
 
   const setShopDoneState = useCallback((next: Record<string, boolean>) => {
@@ -628,22 +653,41 @@ export default function App(): JSX.Element {
       return;
     }
     const snapshotView = viewOverride ?? (screen === 'shop' ? 'shop' : 'battle');
+    const currentProjectileCount = runtimeRef.current.projectiles.length;
+    const enteringProjectilePhase =
+      currentMatch.phase === 'projectile'
+      && lastBroadcastPhaseRef.current !== 'projectile';
+    const projectileCountChanged = lastBroadcastProjectileCountRef.current !== currentProjectileCount;
+    if (
+      snapshotView === 'battle'
+      && !forceTerrain
+      && currentMatch.phase === 'projectile'
+      && runtimeRef.current.explosions.length === 0
+      && !enteringProjectilePhase
+      && !projectileCountChanged
+    ) {
+      // Skip network snapshots during pure projectile flight; resume once the first explosion starts.
+      return;
+    }
     const now = Date.now();
-    const periodicTerrainSyncDue = now - lastBroadcastAtRef.current >= 2000;
+    const periodicTerrainSyncDue = now - lastBroadcastAtRef.current >= NETWORK_PERIODIC_TERRAIN_SYNC_MS;
+    const terrainSyncCadenceDue = now - lastBroadcastAtRef.current >= NETWORK_TERRAIN_SYNC_INTERVAL_MS;
     const terrainObjectChanged = lastBroadcastTerrainRef.current !== currentTerrain;
     const viewChanged = lastBroadcastViewRef.current !== snapshotView;
+    const terrainChanged = terrainObjectChanged || lastBroadcastTerrainRevisionRef.current !== currentTerrain.revision;
+    const warmupTerrainDue = snapshotView === 'battle' && battleTerrainWarmupRemainingRef.current > 0;
     const includeTerrain =
       forceTerrain
-      || terrainObjectChanged
       || viewChanged
-      || lastBroadcastTerrainRevisionRef.current !== currentTerrain.revision
+      || warmupTerrainDue
+      || (terrainChanged && terrainSyncCadenceDue)
       || periodicTerrainSyncDue;
     const payload: GameSnapshotPayload = {
       roomId: session.roomId,
       tick: networkTickRef.current++,
       view: snapshotView,
-      shopIndex,
-      shopDoneByPlayerId: shopDoneByPlayerIdRef.current,
+      shopIndex: snapshotView === 'shop' ? shopIndex : undefined,
+      shopDoneByPlayerId: snapshotView === 'shop' ? shopDoneByPlayerIdRef.current : undefined,
       match: currentMatch,
       runtime: runtimeRef.current,
       message,
@@ -653,10 +697,86 @@ export default function App(): JSX.Element {
       lastBroadcastTerrainRevisionRef.current = currentTerrain.revision;
       lastBroadcastTerrainRef.current = currentTerrain;
       lastBroadcastAtRef.current = now;
+      if (warmupTerrainDue) {
+        battleTerrainWarmupRemainingRef.current = Math.max(0, battleTerrainWarmupRemainingRef.current - 1);
+      }
     }
     lastBroadcastViewRef.current = snapshotView;
+    lastBroadcastPhaseRef.current = currentMatch.phase;
+    lastBroadcastProjectileCountRef.current = currentProjectileCount;
     session.client.sendGameSnapshot(payload);
   }, [message, screen, shopIndex]);
+
+  const advanceClientProjectilePrediction = useCallback((deltaMs: number) => {
+    const currentMatch = matchRef.current;
+    const currentTerrain = terrainRef.current;
+    if (!currentMatch || !currentTerrain) {
+      predictedRuntimeRef.current = null;
+      clientPredictionAccumulatorRef.current = 0;
+      return;
+    }
+    const authoritativeRuntime = runtimeRef.current;
+    const shouldPredict =
+      currentMatch.phase === 'projectile'
+      && authoritativeRuntime.explosions.length === 0
+      && authoritativeRuntime.projectiles.length > 0;
+    if (!shouldPredict) {
+      predictedRuntimeRef.current = null;
+      clientPredictionAccumulatorRef.current = 0;
+      return;
+    }
+    if (!predictedRuntimeRef.current) {
+      predictedRuntimeRef.current = cloneRuntimeState(authoritativeRuntime);
+      clientPredictionAccumulatorRef.current = 0;
+    }
+    const predicted = predictedRuntimeRef.current;
+    clientPredictionAccumulatorRef.current += Math.min(250, deltaMs) / 1000;
+    while (clientPredictionAccumulatorRef.current >= FIXED_DT) {
+      clientPredictionAccumulatorRef.current -= FIXED_DT;
+      const survivors: ProjectileState[] = [];
+      for (const projectile of predicted.projectiles) {
+        let p = projectile;
+        let collided = false;
+        const subStepCount = 4;
+        const projectileTimeScale = 2.2;
+        const subDt = FIXED_DT / subStepCount;
+
+        for (let s = 0; s < subStepCount; s += 1) {
+          const before = p;
+          p = stepProjectile(p, subDt * projectileTimeScale, currentMatch.settings.gravity, currentMatch.wind);
+          predicted.trails.push({
+            x1: before.x,
+            y1: before.y,
+            x2: p.x,
+            y2: p.y,
+            ownerId: p.ownerId,
+            life: p.weaponId === 'smoke-tracer' ? 2.6 : p.weaponId === 'tracer' ? 1.8 : 0.85,
+            color: p.color,
+          });
+          const outOfBounds = p.x < 0 || p.x >= currentTerrain.width || p.y >= currentTerrain.height || p.ttl <= 0;
+          if (outOfBounds || (p.y >= 0 && isSolid(currentTerrain, p.x, p.y))) {
+            collided = true;
+            break;
+          }
+        }
+
+        if (collided || p.ttl <= 0) {
+          continue;
+        }
+        survivors.push(p);
+      }
+      predicted.projectiles = survivors;
+      if (!currentMatch.settings.shotTraces) {
+        predicted.trails = predicted.trails
+          .map((t) => ({ ...t, life: t.life - FIXED_DT * 1.6 }))
+          .filter((t) => t.life > 0)
+          .slice(-2400);
+      }
+      if (survivors.length === 0) {
+        break;
+      }
+    }
+  }, []);
 
   useEffect(() => {
     const liveMatch = matchRef.current;
@@ -779,21 +899,28 @@ export default function App(): JSX.Element {
       }
       return count;
     };
-    const solveSeatedY = (terrainState: TerrainState, x: number): number => {
-      let y = terrainState.heights[x] - 4;
-      for (let i = 0; i < 8; i += 1) {
-        if (bodyOverlapCountAt(terrainState, x, y) <= 6) {
-          break;
+    const hasFirmTankFooting = (terrainState: TerrainState, x: number, y: number): boolean => {
+      const footY = Math.floor(y + 5);
+      const wheelLeft = x - 4;
+      const wheelRight = x + 4;
+      const leftWheelSupported = isSolid(terrainState, wheelLeft, footY) || isSolid(terrainState, wheelLeft, footY + 1);
+      const rightWheelSupported = isSolid(terrainState, wheelRight, footY) || isSolid(terrainState, wheelRight, footY + 1);
+      return leftWheelSupported && rightWheelSupported && supportCountAt(terrainState, x, y) >= 6;
+    };
+    const solveSeatedY = (terrainState: TerrainState, x: number): number | null => {
+      const surfaceY = terrainState.heights[x] - 4;
+      const minY = Math.max(2, surfaceY - 8);
+      const maxY = Math.min(terrainState.height - 10, surfaceY + 6);
+      for (let y = minY; y <= maxY; y += 1) {
+        if (bodyOverlapCountAt(terrainState, x, y) > 6) {
+          continue;
         }
-        y -= 1;
-      }
-      for (let i = 0; i < 12; i += 1) {
-        if (supportCountAt(terrainState, x, y) >= 4) {
-          break;
+        if (!hasFirmTankFooting(terrainState, x, y)) {
+          continue;
         }
-        y += 1;
+        return y;
       }
-      return y;
+      return null;
     };
 
     const picks: number[] = [];
@@ -803,6 +930,9 @@ export default function App(): JSX.Element {
       for (let attempt = 0; attempt < 180; attempt += 1) {
         const candidate = clamp(Math.floor(minX + Math.random() * (maxX - minX + 1)), minX, maxX);
         if (!isStableSpawnX(candidate, terrainOut)) {
+          continue;
+        }
+        if (solveSeatedY(terrainOut, candidate) === null) {
           continue;
         }
         if (picks.every((x) => Math.abs(x - candidate) >= minSep)) {
@@ -819,7 +949,7 @@ export default function App(): JSX.Element {
 
     const nextPlayers = players.map((player, i) => {
       const x = picks[i];
-      const y = solveSeatedY(terrainOut, x);
+      const y = solveSeatedY(terrainOut, x) ?? (terrainOut.heights[x] - 4);
       return {
         ...player,
         x,
@@ -2351,14 +2481,14 @@ export default function App(): JSX.Element {
         return;
       }
       const active = currentMatch.players.find((p) => p.config.id === currentMatch.activePlayerId);
-      if (!active || active.config.id !== session.selfPeerId || active.config.kind !== 'human') {
-        return;
+      if (active && active.config.id === session.selfPeerId && active.config.kind === 'human') {
+        session.client.sendGameInput({
+          roomId: session.roomId,
+          input,
+          deltaMs,
+        });
       }
-      session.client.sendGameInput({
-        roomId: session.roomId,
-        input,
-        deltaMs,
-      });
+      advanceClientProjectilePrediction(deltaMs);
       return;
     }
     const currentTerrain = terrainRef.current;
@@ -2441,7 +2571,8 @@ export default function App(): JSX.Element {
     }
 
     uiSyncAccumulatorRef.current += deltaMs;
-    if (uiSyncAccumulatorRef.current >= 80) {
+    const uiSyncInterval = networkMode === 'host' ? HOST_UI_SYNC_INTERVAL_MS : DEFAULT_UI_SYNC_INTERVAL_MS;
+    if (uiSyncAccumulatorRef.current >= uiSyncInterval) {
       if (matchRef.current) {
         setMatch(matchRef.current);
       }
@@ -2453,7 +2584,7 @@ export default function App(): JSX.Element {
       }
       uiSyncAccumulatorRef.current = 0;
     }
-  }, [applyHeldAimInput, fireWeapon, networkMode, pushHostSnapshot, screen, shieldMenuOpen, stepSimulation]);
+  }, [advanceClientProjectilePrediction, applyHeldAimInput, fireWeapon, networkMode, pushHostSnapshot, screen, shieldMenuOpen, stepSimulation]);
 
   const startShopToBattle = useCallback(async (existingMatch: MatchState) => {
     const nextSize = networkMode === 'client'
@@ -2496,6 +2627,7 @@ export default function App(): JSX.Element {
     setMessage(`Terrain: ${generated.source}`);
     setShopDoneState({});
     if (networkMode === 'host') {
+      battleTerrainWarmupRemainingRef.current = BATTLE_TERRAIN_WARMUP_SNAPSHOTS;
       pushHostSnapshot(true, 'battle');
     }
   }, [makeTerrainForRound, networkMode, placePlayersOnTerrain, pushHostSnapshot, resetRuntime, setShopDoneState, viewportSize.height, viewportSize.width]);
@@ -2618,6 +2750,12 @@ export default function App(): JSX.Element {
         const nextRuntime = payload.runtime as RuntimeState;
         matchRef.current = nextMatch;
         runtimeRef.current = nextRuntime;
+        const canPredictFromSnapshot =
+          nextMatch.phase === 'projectile'
+          && nextRuntime.explosions.length === 0
+          && nextRuntime.projectiles.length > 0;
+        predictedRuntimeRef.current = canPredictFromSnapshot ? cloneRuntimeState(nextRuntime) : null;
+        clientPredictionAccumulatorRef.current = 0;
         setMatch(nextMatch);
         setMessage(payload.message);
         if (payload.terrain) {
@@ -2663,6 +2801,9 @@ export default function App(): JSX.Element {
       lastBroadcastTerrainRef.current = null;
       lastBroadcastAtRef.current = 0;
       lastBroadcastViewRef.current = '';
+      battleTerrainWarmupRemainingRef.current = 0;
+      lastBroadcastPhaseRef.current = '';
+      lastBroadcastProjectileCountRef.current = 0;
       setShopIndex(0);
       setScreen('shop');
       pushHostSnapshot(true, 'shop');
@@ -2688,6 +2829,7 @@ export default function App(): JSX.Element {
     lastBroadcastTerrainRef.current = null;
     lastBroadcastAtRef.current = 0;
     lastBroadcastViewRef.current = '';
+    battleTerrainWarmupRemainingRef.current = 0;
     setShopDoneState({});
     setNetworkMode('offline');
   }, [setShopDoneState]);
@@ -2943,7 +3085,7 @@ export default function App(): JSX.Element {
           getSnapshot={() => ({
             match: matchRef.current,
             terrain: terrainRef.current,
-            runtime: runtimeRef.current,
+            runtime: networkMode === 'client' && predictedRuntimeRef.current ? predictedRuntimeRef.current : runtimeRef.current,
             message,
           })}
           onInputFrame={onBattleInputFrame}

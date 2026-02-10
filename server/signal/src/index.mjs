@@ -264,8 +264,9 @@ function handleMessage(peerId, msg) {
       sendError(peer, 'forbidden', 'Only host can start match');
       return;
     }
+    const forceStart = Boolean(payload.forceStart);
     const readyCount = room.players.filter((p) => p.ready).length;
-    if (readyCount < 2) {
+    if (!forceStart && readyCount < 2) {
       sendError(peer, 'bad_request', 'Need at least 2 ready players');
       return;
     }
