@@ -895,8 +895,7 @@ export function BattleScreen({
       antialias: false,
       scene: [BattleScene],
       scale: {
-        mode: Phaser.Scale.FIT,
-        autoCenter: Phaser.Scale.CENTER_BOTH,
+        mode: Phaser.Scale.NONE,
       },
       audio: { noAudio: true },
     });

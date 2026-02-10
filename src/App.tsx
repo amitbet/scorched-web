@@ -21,6 +21,7 @@ import { SHIELD_ITEMS, activateShieldFromInventory, autoActivateShieldAtRoundSta
 import { decodeTerrain, encodeTerrain } from './net/stateCodec';
 import type { GameInputPayload, GameSnapshotPayload } from './net/protocol';
 import { SignalClient } from './net/signalingClient';
+import { deriveBattlefieldSize } from './game/viewport';
 
 type Screen = 'title' | 'settings' | 'players' | 'shop' | 'battle' | 'matchEnd' | 'lan';
 
@@ -83,6 +84,11 @@ interface LanSessionState {
   roomId: string;
   selfPeerId: string;
   isHost: boolean;
+}
+
+interface ViewportSize {
+  width: number;
+  height: number;
 }
 
 function makeDefaultPlayers(): PlayerConfig[] {
@@ -494,6 +500,10 @@ export default function App(): JSX.Element {
   const [lanEntryMode, setLanEntryMode] = useState<'host' | 'join'>('host');
   const [networkMode, setNetworkMode] = useState<NetworkMode>('offline');
   const [shopDoneByPlayerId, setShopDoneByPlayerId] = useState<Record<string, boolean>>({});
+  const [viewportSize, setViewportSize] = useState<ViewportSize>({
+    width: window.innerWidth,
+    height: window.innerHeight,
+  });
 
   const runtimeRef = useRef<RuntimeState>({
     projectiles: [],
@@ -530,6 +540,17 @@ export default function App(): JSX.Element {
   useEffect(() => {
     terrainRef.current = terrain;
   }, [terrain]);
+
+  useEffect(() => {
+    const onResize = () => {
+      setViewportSize({
+        width: window.innerWidth,
+        height: window.innerHeight,
+      });
+    };
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
 
   useEffect(() => {
     shopDoneByPlayerIdRef.current = shopDoneByPlayerId;
@@ -636,6 +657,23 @@ export default function App(): JSX.Element {
     lastBroadcastViewRef.current = snapshotView;
     session.client.sendGameSnapshot(payload);
   }, [message, screen, shopIndex]);
+
+  useEffect(() => {
+    const liveMatch = matchRef.current;
+    if (screen !== 'shop' || !liveMatch || networkMode === 'client') {
+      return;
+    }
+    const nextSize = deriveBattlefieldSize(viewportSize.width, viewportSize.height);
+    if (liveMatch.width === nextSize.width && liveMatch.height === nextSize.height) {
+      return;
+    }
+    const resized = { ...liveMatch, width: nextSize.width, height: nextSize.height };
+    matchRef.current = resized;
+    setMatch(resized);
+    if (networkMode === 'host') {
+      pushHostSnapshot(true, 'shop');
+    }
+  }, [networkMode, pushHostSnapshot, screen, viewportSize.height, viewportSize.width]);
 
   const makeTerrainForRound = useCallback(async (
     width: number,
@@ -2211,14 +2249,17 @@ export default function App(): JSX.Element {
         setScreen('matchEnd');
       } else {
         void (async () => {
+          const nextSize = networkMode === 'client'
+            ? { width: postRound.width, height: postRound.height }
+            : deriveBattlefieldSize(viewportSize.width, viewportSize.height);
           const generated = await makeTerrainForRound(
-            postRound.width,
-            postRound.height,
+            nextSize.width,
+            nextSize.height,
             postRound.settings.terrainPreset,
             postRound.players.length,
           );
           const regenerated = generated.terrain;
-          const placed = placePlayersOnTerrain(postRound, regenerated);
+          const placed = placePlayersOnTerrain({ ...postRound, width: nextSize.width, height: nextSize.height }, regenerated);
           const reseated = placed.match;
           resetRuntime();
           matchRef.current = reseated;
@@ -2252,7 +2293,7 @@ export default function App(): JSX.Element {
 
     matchRef.current = nextMatch;
     terrainRef.current = nextTerrain;
-  }, [makeTerrainForRound, networkMode, placePlayersOnTerrain, pushHostSnapshot, resetRuntime]);
+  }, [makeTerrainForRound, networkMode, placePlayersOnTerrain, pushHostSnapshot, resetRuntime, viewportSize.height, viewportSize.width]);
 
   useEffect(() => {
     if (!match || !terrain || screen !== 'battle') {
@@ -2415,15 +2456,20 @@ export default function App(): JSX.Element {
   }, [applyHeldAimInput, fireWeapon, networkMode, pushHostSnapshot, screen, shieldMenuOpen, stepSimulation]);
 
   const startShopToBattle = useCallback(async (existingMatch: MatchState) => {
+    const nextSize = networkMode === 'client'
+      ? { width: existingMatch.width, height: existingMatch.height }
+      : deriveBattlefieldSize(viewportSize.width, viewportSize.height);
     const generated = await makeTerrainForRound(
-      existingMatch.width,
-      existingMatch.height,
+      nextSize.width,
+      nextSize.height,
       existingMatch.settings.terrainPreset,
       existingMatch.players.length,
     );
     const regenerated = generated.terrain;
     const prepared = {
       ...existingMatch,
+      width: nextSize.width,
+      height: nextSize.height,
       players: existingMatch.players.map((p) => ({
         ...p,
         alive: true,
@@ -2452,7 +2498,7 @@ export default function App(): JSX.Element {
     if (networkMode === 'host') {
       pushHostSnapshot(true, 'battle');
     }
-  }, [makeTerrainForRound, networkMode, placePlayersOnTerrain, pushHostSnapshot, resetRuntime, setShopDoneState]);
+  }, [makeTerrainForRound, networkMode, placePlayersOnTerrain, pushHostSnapshot, resetRuntime, setShopDoneState, viewportSize.height, viewportSize.width]);
 
   const useShieldFromPopup = useCallback((shieldId: 'shield' | 'medium-shield' | 'heavy-shield') => {
     const liveMatch = matchRef.current;
@@ -2594,7 +2640,8 @@ export default function App(): JSX.Element {
         colorIndex: idx % 8,
         enabled: true,
       }));
-      const seeded = initMatch(settings, lanPlayers, window.innerWidth, window.innerHeight);
+      const lanViewport = deriveBattlefieldSize(viewportSize.width, viewportSize.height);
+      const seeded = initMatch(settings, lanPlayers, lanViewport.width, lanViewport.height);
       const nextMatch = {
         ...seeded.match,
         activePlayerId: lanPlayers[0].id,
@@ -2628,7 +2675,7 @@ export default function App(): JSX.Element {
     setTerrain(null);
     setMessage('Waiting for host state snapshot...');
     setScreen('battle');
-  }, [allPlayersShopDone, markShopDone, pushHostSnapshot, resetRuntime, setShopDoneState, settings, startShopToBattle]);
+  }, [allPlayersShopDone, markShopDone, pushHostSnapshot, resetRuntime, setShopDoneState, settings, startShopToBattle, viewportSize.height, viewportSize.width]);
 
   const clearLanSession = useCallback(() => {
     const live = lanSessionRef.current;
@@ -2710,7 +2757,8 @@ export default function App(): JSX.Element {
           onBack={() => setScreen('title')}
           onNext={async () => {
             const enabled = playerConfigs.filter((p) => p.enabled);
-            const { match: seededMatch } = initMatch(settings, enabled, window.innerWidth, window.innerHeight);
+            const localViewport = deriveBattlefieldSize(viewportSize.width, viewportSize.height);
+            const { match: seededMatch } = initMatch(settings, enabled, localViewport.width, localViewport.height);
             const generated = await makeTerrainForRound(
               seededMatch.width,
               seededMatch.height,
