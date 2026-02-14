@@ -17,7 +17,7 @@ import { generateTerrain } from './engine/terrain/TerrainGenerator';
 import { pickRandomMtn, preloadMtnTerrains } from './engine/terrain/MtnTerrain';
 import { computeExplosionDamage } from './game/Combat';
 import { getWeaponRuntimeSpec } from './game/weapons/runtimeSpecs';
-import { SHIELD_ITEMS, activateShieldFromInventory, autoActivateShieldAtRoundStart } from './game/Shield';
+import { SHIELD_ITEMS, activateShieldFromInventory, autoActivateShieldAtRoundStart, degradeShield } from './game/Shield';
 import { decodeTerrain, encodeTerrain } from './net/stateCodec';
 import type { GameInputPayload, GameSnapshotPayload } from './net/protocol';
 import { SignalClient } from './net/signalingClient';
@@ -268,15 +268,37 @@ function maxPowerForHp(hp: number): number {
   return clamp(Math.round(hp * 10), 0, 1000);
 }
 
-function boostShield(player: PlayerState, shieldId: 'shield' | 'medium-shield' | 'heavy-shield'): PlayerState {
+function boostShield(player: PlayerState, shieldId: string): PlayerState {
   const item = SHIELD_ITEMS.find((entry) => entry.id === shieldId);
   if (!item) {
     return player;
   }
   return {
     ...player,
-    shield: clamp(player.shield + item.boost, 0, 1000),
+    shield: item.initialStrength,
+    shieldType: item.shieldType,
   };
+}
+
+const SHIELD_DOME_RADIUS = 20;
+const MAG_DEFLECTOR_INFLUENCE_RADIUS = 80;
+const MAG_DEFLECTOR_FORCE = 200000;
+
+function projectileHitsShieldDome(px: number, py: number, player: PlayerState): boolean {
+  const dx = px - player.x;
+  const dy = py - player.y;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+  return dist <= SHIELD_DOME_RADIUS;
+}
+
+function reflectVelocity(vx: number, vy: number, px: number, py: number, centerX: number, centerY: number): { vx: number; vy: number } {
+  const nx = px - centerX;
+  const ny = py - centerY;
+  const len = Math.sqrt(nx * nx + ny * ny) || 1;
+  const nnx = nx / len;
+  const nny = ny / len;
+  const dot = vx * nnx + vy * nny;
+  return { vx: vx - 2 * dot * nnx, vy: vy - 2 * dot * nny };
 }
 
 function pushFx(
@@ -1033,16 +1055,14 @@ export default function App(): JSX.Element {
 
     if (weapon.projectileCount <= 0) {
       const batteryHeal = weapon.id === 'battery' ? 32 : 0;
-      const shieldBoost =
-        weapon.id === 'shield' ? 35 :
-        weapon.id === 'medium-shield' ? 55 :
-        weapon.id === 'heavy-shield' ? 85 : 0;
+      const shieldItem = SHIELD_ITEMS.find((s) => s.id === weapon.id);
       const fuelBoost = weapon.id === 'fuel' ? 100 : 0;
       const parachuteBoost = weapon.id === 'parachute' ? 1 : 0;
       const updated = {
         ...armedShooter,
         hp: clamp(armedShooter.hp + batteryHeal, 0, 100),
-        shield: clamp(armedShooter.shield + shieldBoost * 8, 0, 1000),
+        shield: shieldItem ? shieldItem.initialStrength : armedShooter.shield,
+        shieldType: shieldItem ? shieldItem.shieldType : armedShooter.shieldType,
         fuel: clamp(armedShooter.fuel + fuelBoost, 0, 1000),
         parachutes: clamp(armedShooter.parachutes + parachuteBoost, 0, 9),
       };
@@ -1694,6 +1714,26 @@ export default function App(): JSX.Element {
           y = primary.y;
           stable = true;
         }
+        // Shield dome check for rollers
+        let rollerShieldAbsorbed = false;
+        for (const shieldPlayer of nextMatch.players) {
+          if (!shieldPlayer.alive || shieldPlayer.config.id === projectile.ownerId || shieldPlayer.shieldType === 'none' || shieldPlayer.shieldType === 'mag-deflector') continue;
+          if (projectileHitsShieldDome(x, y, shieldPlayer)) {
+            const degraded = degradeShield(shieldPlayer);
+            nextMatch = { ...nextMatch, players: nextMatch.players.map((pp) => pp.config.id === shieldPlayer.config.id ? degraded : pp) };
+            if (shieldPlayer.shieldType === 'bouncy') {
+              dir = -dir;
+              pushFx(runtime, () => nextFxIdRef.current++, { x: shieldPlayer.x, y: shieldPlayer.y - 10, radius: SHIELD_DOME_RADIUS, life: 0.25, maxLife: 0.25, color: '#bb66ff', kind: 'simple' });
+              survivors.push({ ...projectile, x: projectile.x, y: projectile.y, direction: dir, ttl: projectile.ttl - FIXED_DT });
+            } else {
+              pushFx(runtime, () => nextFxIdRef.current++, { x: shieldPlayer.x, y: shieldPlayer.y - 10, radius: SHIELD_DOME_RADIUS, life: 0.25, maxLife: 0.25, color: shieldPlayer.shieldType === 'heavy' ? '#ffffff' : '#88aaff', kind: 'simple' });
+            }
+            rollerShieldAbsorbed = true;
+            break;
+          }
+        }
+        if (rollerShieldAbsorbed) continue;
+
         const hitPlayer = nextMatch.players.find(
           (player) =>
             player.alive &&
@@ -1729,6 +1769,7 @@ export default function App(): JSX.Element {
       const subStepCount = 4;
       const projectileTimeScale = 2.2;
       const subDt = FIXED_DT / subStepCount;
+      const magDeflectorHitSet = new Set<string>();
 
       for (let s = 0; s < subStepCount; s += 1) {
         const before = p;
@@ -1758,6 +1799,62 @@ export default function App(): JSX.Element {
           collided = true;
           break;
         }
+
+        // Mag Deflector force: apply repulsive force for nearby mag-deflector shields
+        for (const shieldPlayer of nextMatch.players) {
+          if (!shieldPlayer.alive || shieldPlayer.config.id === p.ownerId || shieldPlayer.shieldType !== 'mag-deflector') continue;
+          const mdx = p.x - shieldPlayer.x;
+          const mdy = p.y - shieldPlayer.y;
+          const mdist = Math.sqrt(mdx * mdx + mdy * mdy);
+          if (mdist > 0 && mdist <= MAG_DEFLECTOR_INFLUENCE_RADIUS) {
+            const dt2 = subDt * projectileTimeScale;
+            const accel = MAG_DEFLECTOR_FORCE / Math.max(mdist, 5);
+            const fnx = mdx / mdist;
+            const fny = mdy / mdist;
+            // Apply both velocity change AND direct position nudge for immediate effect
+            const dvx = fnx * accel * dt2;
+            const dvy = fny * accel * dt2;
+            p = {
+              ...p,
+              vx: p.vx + dvx,
+              vy: p.vy + dvy,
+              x: p.x + dvx * dt2,
+              y: p.y + dvy * dt2,
+            };
+            if (mdist <= SHIELD_DOME_RADIUS && !magDeflectorHitSet.has(shieldPlayer.config.id)) {
+              magDeflectorHitSet.add(shieldPlayer.config.id);
+              const degraded = degradeShield(shieldPlayer);
+              nextMatch = { ...nextMatch, players: nextMatch.players.map((pp) => pp.config.id === shieldPlayer.config.id ? degraded : pp) };
+              pushFx(runtime, () => nextFxIdRef.current++, { x: shieldPlayer.x, y: shieldPlayer.y - 10, radius: SHIELD_DOME_RADIUS, life: 0.2, maxLife: 0.2, color: '#ffdd00', kind: 'simple' });
+            }
+          }
+        }
+
+        // Shield dome collision: absorb or reflect for non-mag-deflector shields
+        let shieldAbsorbed = false;
+        let shieldBounced = false;
+        for (const shieldPlayer of nextMatch.players) {
+          if (!shieldPlayer.alive || shieldPlayer.config.id === p.ownerId || shieldPlayer.shieldType === 'none' || shieldPlayer.shieldType === 'mag-deflector') continue;
+          if (projectileHitsShieldDome(p.x, p.y, shieldPlayer)) {
+            const degraded = degradeShield(shieldPlayer);
+            nextMatch = { ...nextMatch, players: nextMatch.players.map((pp) => pp.config.id === shieldPlayer.config.id ? degraded : pp) };
+            if (shieldPlayer.shieldType === 'bouncy') {
+              const reflected = reflectVelocity(p.vx, p.vy, p.x, p.y, shieldPlayer.x, shieldPlayer.y);
+              const dx = p.x - shieldPlayer.x;
+              const dy = p.y - shieldPlayer.y;
+              const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+              p = { ...p, vx: reflected.vx, vy: reflected.vy, x: shieldPlayer.x + (dx / dist) * (SHIELD_DOME_RADIUS + 2), y: shieldPlayer.y + (dy / dist) * (SHIELD_DOME_RADIUS + 2) };
+              pushFx(runtime, () => nextFxIdRef.current++, { x: shieldPlayer.x, y: shieldPlayer.y - 10, radius: SHIELD_DOME_RADIUS, life: 0.25, maxLife: 0.25, color: '#bb66ff', kind: 'simple' });
+              shieldBounced = true;
+            } else {
+              pushFx(runtime, () => nextFxIdRef.current++, { x: shieldPlayer.x, y: shieldPlayer.y - 10, radius: SHIELD_DOME_RADIUS, life: 0.25, maxLife: 0.25, color: shieldPlayer.shieldType === 'heavy' ? '#ffffff' : '#88aaff', kind: 'simple' });
+              shieldAbsorbed = true;
+              collided = true;
+            }
+            break;
+          }
+        }
+        if (shieldAbsorbed || shieldBounced) break;
 
         const skyOverflowLimit = currentTerrain.height * 0.5;
         const outOfBounds = p.x < 0
@@ -2632,7 +2729,7 @@ export default function App(): JSX.Element {
     }
   }, [makeTerrainForRound, networkMode, placePlayersOnTerrain, pushHostSnapshot, resetRuntime, setShopDoneState, viewportSize.height, viewportSize.width]);
 
-  const useShieldFromPopup = useCallback((shieldId: 'shield' | 'medium-shield' | 'heavy-shield') => {
+  const useShieldFromPopup = useCallback((shieldId: string) => {
     const liveMatch = matchRef.current;
     if (!liveMatch || liveMatch.phase !== 'aim') {
       return;
@@ -2842,7 +2939,9 @@ export default function App(): JSX.Element {
   const allLanShopDone = match ? allPlayersShopDone(match.players, shopDoneByPlayerId) : false;
   const shieldMenuItems = activeBattlePlayer
     ? SHIELD_ITEMS.map((item) => ({
-      ...item,
+      id: item.id,
+      name: item.name,
+      initialStrength: item.initialStrength,
       count: match?.settings.freeFireMode ? 999 : (activeBattlePlayer.inventory[item.id] ?? 0),
     }))
     : [];

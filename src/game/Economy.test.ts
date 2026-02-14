@@ -8,6 +8,7 @@ const basePlayer: PlayerState = {
   cash: 30000,
   armor: 100,
   shield: 0,
+  shieldType: 'none',
   fuel: 100,
   parachutes: 0,
   inventory: { [STARTER_WEAPON_ID]: 999 },

@@ -4,6 +4,7 @@ export type AILevel = 'easy' | 'normal' | 'hard';
 export type PlayerKind = 'human' | 'ai';
 export type WeaponSpecial = 'normal' | 'drill' | 'roller' | 'cluster' | 'napalm' | 'nuke';
 export type TerrainEffect = 'crater' | 'tunnel' | 'burn' | 'none';
+export type ShieldType = 'none' | 'regular' | 'heavy' | 'bouncy' | 'mag-deflector';
 export type WeaponCategory = 'weapons' | 'earthworks' | 'misc';
 
 export interface GameSettings {
@@ -52,6 +53,7 @@ export interface PlayerState {
   cash: number;
   armor: number;
   shield: number;
+  shieldType: ShieldType;
   fuel: number;
   parachutes: number;
   inventory: InventoryMap;

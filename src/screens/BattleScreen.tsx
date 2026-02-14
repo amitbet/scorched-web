@@ -57,9 +57,9 @@ interface BattleScreenProps {
   message: string;
   shieldMenuOpen: boolean;
   shieldMenuPlayerName: string;
-  shieldMenuItems: Array<{ id: 'shield' | 'medium-shield' | 'heavy-shield'; name: string; count: number; boost: number }>;
+  shieldMenuItems: Array<{ id: string; name: string; count: number; initialStrength: number }>;
   onCloseShieldMenu: () => void;
-  onActivateShield: (shieldId: 'shield' | 'medium-shield' | 'heavy-shield') => void;
+  onActivateShield: (shieldId: string) => void;
   getSnapshot: () => {
     match: MatchState | null;
     terrain: TerrainState | null;
@@ -620,6 +620,56 @@ class BattleScene extends Phaser.Scene {
         this.graphics.lineBetween(player.x - 4, player.y - 9, player.x - 1, player.y - 4);
         this.graphics.lineBetween(player.x + 4, player.y - 9, player.x + 1, player.y - 4);
       }
+
+      // Shield dome rendering — drawn behind terrain so ground occludes underground part
+      if (player.shield > 0 && player.shieldType !== 'none') {
+        const hpRatio = Phaser.Math.Clamp(player.shield / 1000, 0, 1);
+        const grey = 0x66;
+        const domeRadius = 20;
+
+        if (player.shieldType === 'mag-deflector') {
+          // Mag Deflector: 2 small identical yellow arches above the tank
+          const baseCol = { r: 0xff, g: 0xdd, b: 0x00 };
+          const r = Math.round(baseCol.r * hpRatio + grey * (1 - hpRatio));
+          const g = Math.round(baseCol.g * hpRatio + grey * (1 - hpRatio));
+          const b = Math.round(baseCol.b * hpRatio + grey * (1 - hpRatio));
+          const archColor = Phaser.Display.Color.GetColor(r, g, b);
+          const archAlpha = Phaser.Math.Clamp(0.5 + hpRatio * 0.4, 0.5, 0.9);
+          // Two 30° arches centered symmetrically above the tank, gap at zenith
+          const archSpan = Math.PI / 6; // 30 degrees
+          const gapHalf = Math.PI / 18; // 10 degrees half-gap
+          const topAngle = -Math.PI / 2; // straight up
+          this.backgroundGraphics.lineStyle(2, archColor, archAlpha);
+          // Left arch
+          this.backgroundGraphics.beginPath();
+          this.backgroundGraphics.arc(player.x, player.y, domeRadius, topAngle - gapHalf - archSpan, topAngle - gapHalf, false);
+          this.backgroundGraphics.strokePath();
+          // Right arch
+          this.backgroundGraphics.beginPath();
+          this.backgroundGraphics.arc(player.x, player.y, domeRadius, topAngle + gapHalf, topAngle + gapHalf + archSpan, false);
+          this.backgroundGraphics.strokePath();
+        } else {
+          // Regular, Heavy, Bouncy: full circle dome
+          const shieldBaseColors: Record<string, { r: number; g: number; b: number }> = {
+            regular: { r: 0x88, g: 0xaa, b: 0xff },
+            heavy: { r: 0xff, g: 0xff, b: 0xff },
+            bouncy: { r: 0xbb, g: 0x66, b: 0xff },
+          };
+          const baseCol = shieldBaseColors[player.shieldType] ?? { r: 0x88, g: 0xaa, b: 0xff };
+          const r = Math.round(baseCol.r * hpRatio + grey * (1 - hpRatio));
+          const g = Math.round(baseCol.g * hpRatio + grey * (1 - hpRatio));
+          const b = Math.round(baseCol.b * hpRatio + grey * (1 - hpRatio));
+          const domeColor = Phaser.Display.Color.GetColor(r, g, b);
+          const domeAlpha = Phaser.Math.Clamp(0.4 + hpRatio * 0.5, 0.4, 0.9);
+          this.backgroundGraphics.lineStyle(2, domeColor, domeAlpha);
+          this.backgroundGraphics.beginPath();
+          this.backgroundGraphics.arc(player.x, player.y, domeRadius, 0, Math.PI * 2, false);
+          this.backgroundGraphics.strokePath();
+          // Inner fill glow
+          this.backgroundGraphics.fillStyle(domeColor, domeAlpha * 0.1);
+          this.backgroundGraphics.fillCircle(player.x, player.y, domeRadius - 1);
+        }
+      }
     }
 
     for (const trail of runtime.trails) {
@@ -1005,7 +1055,7 @@ export function BattleScreen({
                 onClick={() => onActivateShield(item.id)}
                 disabled={item.count <= 0}
               >
-                {`${item.name} (+${item.boost}) x${item.count}`}
+                {`${item.name} x${item.count}`}
               </button>
             ))}
           </div>

@@ -17,6 +17,7 @@ type IconKind =
   | 'sandhog'
   | 'dirt'
   | 'shield'
+  | 'bouncy-shield'
   | 'parachute'
   | 'battery'
   | 'tracer'
@@ -43,6 +44,7 @@ function inferIconKind(id: string): IconKind {
   if (id.includes('sandhog')) return 'sandhog';
   if (id.includes('digger') || id === 'sand-bomb') return 'digger';
   if (id.includes('dirt')) return 'dirt';
+  if (id === 'bouncy-shield') return 'bouncy-shield';
   if (id.includes('shield')) return 'shield';
   if (id === 'parachute') return 'parachute';
   if (id === 'battery') return 'battery';
@@ -283,17 +285,30 @@ function glyphSvg(kind: IconKind, id: string, variant: IconVariant): string {
 
   if (kind === 'shield') {
     const isHeavy = id.includes('heavy');
-    const isMedium = id.includes('medium');
+    const isRegular = id.includes('regular');
     if (variant === 'hud') {
-      return `<circle cx="9" cy="9" r="5" stroke="#000000" stroke-width="${isHeavy ? 2.2 : isMedium ? 1.6 : 1.2}" fill="none"/>`;
+      return `<circle cx="9" cy="9" r="5" stroke="#000000" stroke-width="${isHeavy ? 2.2 : 1.2}" fill="none"/>`;
     }
     if (isHeavy) {
       return `<circle cx="9" cy="9" r="5.2" stroke="#ffffff" stroke-width="2.2" fill="none"/>`;
     }
-    if (isMedium) {
-      return `<circle cx="9" cy="9" r="5" stroke="#c43bff" stroke-width="1.8" fill="none"/>`;
+    if (isRegular) {
+      return `<circle cx="9" cy="9" r="4.8" stroke="#88aaff" stroke-width="1.2" fill="none"/>`;
     }
     return `<circle cx="9" cy="9" r="4.8" stroke="#ffffff" stroke-width="1.2" fill="none"/>`;
+  }
+
+  if (kind === 'bouncy-shield') {
+    if (variant === 'hud') {
+      return [
+        `<circle cx="9" cy="9" r="5" stroke="#000000" stroke-width="1.2" fill="none"/>`,
+        `<path d="M7 7 L9 5 L11 7 M7 11 L9 13 L11 11" stroke="#000000" stroke-width="1" fill="none"/>`,
+      ].join('');
+    }
+    return [
+      `<circle cx="9" cy="9" r="4.8" stroke="#bb66ff" stroke-width="1.2" fill="none"/>`,
+      `<path d="M7 7 L9 5 L11 7 M7 11 L9 13 L11 11" stroke="#bb66ff" stroke-width="1" fill="none"/>`,
+    ].join('');
   }
 
   if (kind === 'parachute') {

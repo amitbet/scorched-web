@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { activateShieldFromInventory, autoActivateShieldAtRoundStart } from './Shield';
+import { activateShieldFromInventory, autoActivateShieldAtRoundStart, degradeShield } from './Shield';
 import { STARTER_WEAPON_ID } from './WeaponCatalog';
 import type { PlayerState } from '../types/game';
 
@@ -8,6 +8,7 @@ const basePlayer: PlayerState = {
   cash: 1000,
   armor: 100,
   shield: 0,
+  shieldType: 'none',
   fuel: 100,
   parachutes: 0,
   inventory: { [STARTER_WEAPON_ID]: 999 },
@@ -25,20 +26,36 @@ const basePlayer: PlayerState = {
 
 describe('Shield', () => {
   it('activates shield from inventory and consumes one item', () => {
-    const p = { ...basePlayer, inventory: { ...basePlayer.inventory, shield: 2 } };
-    const next = activateShieldFromInventory(p, 'shield');
-    expect(next.shield).toBe(220);
-    expect(next.inventory.shield).toBe(1);
+    const p = { ...basePlayer, inventory: { ...basePlayer.inventory, 'regular-shield': 2 } };
+    const next = activateShieldFromInventory(p, 'regular-shield');
+    expect(next.shield).toBe(1000);
+    expect(next.shieldType).toBe('regular');
+    expect(next.inventory['regular-shield']).toBe(1);
   });
 
   it('auto-defense uses strongest available shield at round start', () => {
     const p = {
       ...basePlayer,
-      inventory: { ...basePlayer.inventory, 'auto-defense': 1, shield: 1, 'medium-shield': 1 },
+      inventory: { ...basePlayer.inventory, 'auto-defense': 1, 'regular-shield': 1, 'heavy-shield': 1 },
     };
     const next = autoActivateShieldAtRoundStart(p);
-    expect(next.shield).toBe(420);
-    expect(next.inventory['medium-shield']).toBe(0);
-    expect(next.inventory.shield).toBe(1);
+    expect(next.shield).toBe(1000);
+    expect(next.shieldType).toBe('heavy');
+    expect(next.inventory['heavy-shield']).toBe(0);
+    expect(next.inventory['regular-shield']).toBe(1);
+  });
+
+  it('degrades shield and clears type at zero', () => {
+    const p = { ...basePlayer, shield: 200, shieldType: 'regular' as const };
+    const next = degradeShield(p);
+    expect(next.shield).toBe(0);
+    expect(next.shieldType).toBe('none');
+  });
+
+  it('degrades heavy shield less per hit', () => {
+    const p = { ...basePlayer, shield: 1000, shieldType: 'heavy' as const };
+    const next = degradeShield(p);
+    expect(next.shield).toBe(900);
+    expect(next.shieldType).toBe('heavy');
   });
 });

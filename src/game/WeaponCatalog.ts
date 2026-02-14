@@ -37,9 +37,10 @@ export const WEAPONS: WeaponDef[] = [
   w({ id: 'mirv', name: 'MIRV', packPrice: 35000, packQty: 1, category: 'weapons', damage: 50, blastRadius: 25, projectileCount: 1, spreadDeg: 0, special: 'cluster', terrainEffect: 'crater', unlockTier: 2 }),
   w({ id: 'death-head', name: "Death's Head", packPrice: 90000, packQty: 1, category: 'weapons', damage: 90, blastRadius: 55, projectileCount: 1, spreadDeg: 0, special: 'cluster', terrainEffect: 'crater', unlockTier: 3 }),
 
-  w({ id: 'shield', name: 'Shield', packPrice: 20000, packQty: 1, category: 'misc', damage: 0, blastRadius: 0, projectileCount: 0, spreadDeg: 0, special: 'normal', terrainEffect: 'none', unlockTier: 0 }),
-  w({ id: 'medium-shield', name: 'Medium Shield', packPrice: 27000, packQty: 1, category: 'misc', damage: 0, blastRadius: 0, projectileCount: 0, spreadDeg: 0, special: 'normal', terrainEffect: 'none', unlockTier: 1 }),
-  w({ id: 'heavy-shield', name: 'Heavy Shield', packPrice: 35000, packQty: 1, category: 'misc', damage: 0, blastRadius: 0, projectileCount: 0, spreadDeg: 0, special: 'normal', terrainEffect: 'none', unlockTier: 2 }),
+  w({ id: 'regular-shield', name: 'Regular Shield', packPrice: 20000, packQty: 1, category: 'misc', damage: 0, blastRadius: 0, projectileCount: 0, spreadDeg: 0, special: 'normal', terrainEffect: 'none', unlockTier: 0 }),
+  w({ id: 'heavy-shield', name: 'Heavy Shield', packPrice: 35000, packQty: 1, category: 'misc', damage: 0, blastRadius: 0, projectileCount: 0, spreadDeg: 0, special: 'normal', terrainEffect: 'none', unlockTier: 1 }),
+  w({ id: 'bouncy-shield', name: 'Bouncy Shield', packPrice: 30000, packQty: 1, category: 'misc', damage: 0, blastRadius: 0, projectileCount: 0, spreadDeg: 0, special: 'normal', terrainEffect: 'none', unlockTier: 1 }),
+  w({ id: 'mag-deflector', name: 'Mag Deflector', packPrice: 40000, packQty: 1, category: 'misc', damage: 0, blastRadius: 0, projectileCount: 0, spreadDeg: 0, special: 'normal', terrainEffect: 'none', unlockTier: 2 }),
   w({ id: 'parachute', name: 'Parachute', packPrice: 2000, packQty: 1, category: 'misc', damage: 0, blastRadius: 0, projectileCount: 0, spreadDeg: 0, special: 'normal', terrainEffect: 'none', unlockTier: 0 }),
   w({ id: 'battery', name: 'Battery', packPrice: 4500, packQty: 1, category: 'misc', damage: 0, blastRadius: 0, projectileCount: 0, spreadDeg: 0, special: 'normal', terrainEffect: 'none', unlockTier: 0 }),
   w({ id: 'auto-defense', name: 'Auto Defense', packPrice: 5000, packQty: 1, category: 'misc', damage: 0, blastRadius: 0, projectileCount: 0, spreadDeg: 0, special: 'normal', terrainEffect: 'none', unlockTier: 1 }),

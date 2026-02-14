@@ -16,6 +16,7 @@ function createPlayerState(config: PlayerConfig, settings: GameSettings): Player
     cash: settings.cashStart,
     armor: 100,
     shield: 0,
+    shieldType: 'none',
     fuel: 0,
     parachutes: 0,
     inventory: { [STARTER_WEAPON_ID]: 999 },
@@ -86,13 +87,14 @@ export function nextActivePlayer(match: MatchState): MatchState {
 
 export function applyRoundEnd(match: MatchState): MatchState {
   const winner = match.players.find((p) => p.alive);
-  const players = match.players.map((p) => ({
+  const players: PlayerState[] = match.players.map((p) => ({
     ...p,
     alive: true,
     hp: 100,
     maxPower: 1000,
     power: 200,
     shield: 0,
+    shieldType: 'none' as const,
     fallDistance: 0,
   }));
   const updated = winner
