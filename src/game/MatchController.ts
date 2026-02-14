@@ -18,7 +18,6 @@ function createPlayerState(config: PlayerConfig, settings: GameSettings): Player
     shield: 0,
     shieldType: 'none',
     fuel: 0,
-    parachutes: 0,
     inventory: { [STARTER_WEAPON_ID]: 999 },
     alive: true,
     score: 0,
@@ -39,7 +38,20 @@ export function initMatch(settings: GameSettings, playerConfigs: PlayerConfig[],
   const spacing = width / (players.length + 1);
 
   const seededPlayers = players.map((p, i) => {
-    const x = Math.floor(spacing * (i + 1));
+    let x = Math.floor(spacing * (i + 1));
+    // If the column has no terrain, nudge to the nearest column that does
+    if (terrain.heights[x] >= height) {
+      for (let offset = 1; offset < width; offset += 1) {
+        if (x + offset < width && terrain.heights[x + offset] < height) {
+          x = x + offset;
+          break;
+        }
+        if (x - offset >= 0 && terrain.heights[x - offset] < height) {
+          x = x - offset;
+          break;
+        }
+      }
+    }
     const y = terrain.heights[x] - 8;
     return { ...p, x, y };
   });

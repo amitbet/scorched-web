@@ -27,7 +27,7 @@ function fakeMatch(): MatchState {
         shield: 0,
         shieldType: 'none',
         fuel: 100,
-        parachutes: 0,
+
         inventory: { [STARTER_WEAPON_ID]: 999 },
         alive: true,
         score: 0,
@@ -47,7 +47,7 @@ function fakeMatch(): MatchState {
         shield: 0,
         shieldType: 'none',
         fuel: 100,
-        parachutes: 0,
+
         inventory: { [STARTER_WEAPON_ID]: 999 },
         alive: true,
         score: 0,

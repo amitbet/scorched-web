@@ -55,7 +55,6 @@ export interface PlayerState {
   shield: number;
   shieldType: ShieldType;
   fuel: number;
-  parachutes: number;
   inventory: InventoryMap;
   alive: boolean;
   score: number;

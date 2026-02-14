@@ -6,6 +6,8 @@ import { drawNukeExplosion } from '../game/fx/nukeEffect';
 import { getWeaponById, WEAPONS } from '../game/WeaponCatalog';
 import { getWeaponIcon } from '../game/WeaponIcons';
 
+const BUILD_MARKER = 'floorfix-2026-02-14-01';
+
 export interface BattleRuntimeSnapshot {
   projectiles: {
     x: number;
@@ -55,6 +57,8 @@ interface BattleScreenProps {
   match: MatchState;
   terrain: TerrainState;
   message: string;
+  recreateDisabled?: boolean;
+  onRecreateTerrain: () => void;
   shieldMenuOpen: boolean;
   shieldMenuPlayerName: string;
   shieldMenuItems: Array<{ id: string; name: string; count: number; initialStrength: number }>;
@@ -72,7 +76,7 @@ interface BattleScreenProps {
 
 class BattleScene extends Phaser.Scene {
   private readonly terrainTextureKey = 'battle-terrain-layer';
-  private terrainTextureMeta: { revision: number; width: number; height: number; colored: boolean } | null = null;
+  private terrainTextureMeta: { terrainRef: TerrainState; revision: number; width: number; height: number; colored: boolean } | null = null;
   private getSnapshot!: BattleScreenProps['getSnapshot'];
   private onInputFrame!: BattleScreenProps['onInputFrame'];
   private backgroundGraphics!: Phaser.GameObjects.Graphics;
@@ -478,6 +482,7 @@ class BattleScene extends Phaser.Scene {
     const palette = terrain.colorPalette;
     const colored = Boolean(colorIndices && palette && palette.length > 0);
     const cacheValid = this.terrainTextureMeta
+      && this.terrainTextureMeta.terrainRef === terrain
       && this.terrainTextureMeta.revision === terrain.revision
       && this.terrainTextureMeta.width === terrain.width
       && this.terrainTextureMeta.height === terrain.height
@@ -546,6 +551,7 @@ class BattleScene extends Phaser.Scene {
     }
     this.terrainImage.setVisible(true);
     this.terrainTextureMeta = {
+      terrainRef: terrain,
       revision: terrain.revision,
       width: terrain.width,
       height: terrain.height,
@@ -614,7 +620,7 @@ class BattleScene extends Phaser.Scene {
         this.graphics.fillStyle(0x2b2b2b, 0.7);
         this.graphics.fillCircle(player.x - 2, player.y - 7, 1.5);
       }
-      if (player.parachutes > 0 && player.fallDistance > 2) {
+      if ((player.inventory['parachute'] ?? 0) > 0 && player.fallDistance > 2) {
         this.graphics.lineStyle(1, 0xf1f1f1, 1);
         this.graphics.strokeEllipse(player.x, player.y - 12, 12, 6);
         this.graphics.lineBetween(player.x - 4, player.y - 9, player.x - 1, player.y - 4);
@@ -974,7 +980,7 @@ class BattleScene extends Phaser.Scene {
       this.hudWeaponValueText.setText(`${weapon.name}  Wind:${Math.round(Math.abs(match.wind * 8))}${match.wind >= 0 ? '->' : '<-'}`);
       this.weaponIcon.setPosition(weaponLabelX + this.hudWeaponLabelText.width + 3, 11.5);
       this.hudWeaponValueText.setPosition(this.weaponIcon.x + 10, 6);
-      this.noteText.setText(`${message || `Round ${match.roundIndex}/${match.settings.roundsToWin}`}  Health:${Math.round(active.hp)}%  Fuel:${Math.round(active.fuel)}  Chutes:${active.parachutes}`);
+      this.noteText.setText(`${message || `Round ${match.roundIndex}/${match.settings.roundsToWin}`}  Health:${Math.round(active.hp)}%  Fuel:${Math.round(active.fuel)}  Chutes:${active.inventory['parachute'] ?? 0}`);
     }
   }
 }
@@ -983,6 +989,8 @@ export function BattleScreen({
   match,
   terrain,
   message,
+  recreateDisabled = false,
+  onRecreateTerrain,
   shieldMenuOpen,
   shieldMenuPlayerName,
   shieldMenuItems,
@@ -1043,7 +1051,10 @@ export function BattleScreen({
   return (
     <div className="screen battle-screen">
       <div ref={hostRef} className="battle-host" />
-      <div className="battle-footer">{`${message || `Round ${match.roundIndex}`} | Controls: A/D fuel move, Arrows angle/power, Alt+Up/Down fast power, Alt+Left/Right quick angle, Tab weapon, I inventory shields`}</div>
+      <div className="battle-footer">
+        <span className="battle-footer-text">{`${message || `Round ${match.roundIndex}`} | Controls: A/D fuel move, Arrows angle/power, Alt+Up/Down fast power, Alt+Left/Right quick angle, Tab weapon, I inventory shields | Build:${BUILD_MARKER}`}</span>
+        <button type="button" onClick={onRecreateTerrain} disabled={recreateDisabled}>Recreate Terrain</button>
+      </div>
       {shieldMenuOpen && (
         <div className="shield-popup">
           <div className="shield-popup-title">{`Shield Settings - ${shieldMenuPlayerName}`}</div>

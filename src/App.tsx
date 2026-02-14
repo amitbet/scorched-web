@@ -11,7 +11,7 @@ import { buyWeapon, sellWeapon } from './game/Economy';
 import { STARTER_WEAPON_ID, WEAPONS, getWeaponById } from './game/WeaponCatalog';
 import { FIXED_DT, spreadAngles, stepProjectile, toVelocity } from './engine/physics/Ballistics';
 import { applyRoundEnd, initMatch, nextActivePlayer, updatePlayer } from './game/MatchController';
-import { addDirt, addDirtDisk, addLiquidDirt, carveCrater, settleTerrain } from './engine/terrain/TerrainDeform';
+import { addDirt, addDirtDisk, addLiquidDirt, carveCrater, ensureFloorIntegrity, settleTerrain } from './engine/terrain/TerrainDeform';
 import { computeAIShot } from './engine/ai/AimAI';
 import { generateTerrain } from './engine/terrain/TerrainGenerator';
 import { pickRandomMtn, preloadMtnTerrains } from './engine/terrain/MtnTerrain';
@@ -156,8 +156,154 @@ function isSolid(terrain: TerrainState, x: number, y: number): boolean {
   return terrain.mask[ty * terrain.width + tx] === 1;
 }
 
+function isProjectileCollisionSolid(terrain: TerrainState, x: number, y: number): boolean {
+  return isSolid(terrain, x, y);
+}
+
+function firstSolidOnSegment(
+  terrain: TerrainState,
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+  includeFloorBand = false,
+): { x: number; y: number } | null {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const steps = Math.max(1, Math.ceil(Math.max(Math.abs(dx), Math.abs(dy)) * 1.5));
+  for (let i = 1; i <= steps; i += 1) {
+    const t = i / steps;
+    const sx = x1 + dx * t;
+    const sy = y1 + dy * t;
+    const hit = includeFloorBand ? isProjectileCollisionSolid(terrain, sx, sy) : isSolid(terrain, sx, sy);
+    if (hit) {
+      return { x: sx, y: sy };
+    }
+  }
+  return null;
+}
+
+function resolveTerrainImpactPoint(terrain: TerrainState, xRaw: number, yRaw: number): { x: number; y: number } {
+  const x = clamp(Math.floor(xRaw), 0, terrain.width - 1);
+  const y = clamp(Math.floor(yRaw), 0, terrain.height - 1);
+  if (isSolid(terrain, x, y)) {
+    return { x, y };
+  }
+
+  for (let yy = y; yy < terrain.height; yy += 1) {
+    if (terrain.mask[yy * terrain.width + x] === 1) {
+      return { x, y: yy };
+    }
+  }
+  for (let yy = y; yy >= 0; yy -= 1) {
+    if (terrain.mask[yy * terrain.width + x] === 1) {
+      return { x, y: yy };
+    }
+  }
+  return { x, y };
+}
+
 function clamp(v: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, v));
+}
+
+function nearestSurfaceColumn(
+  terrain: TerrainState,
+  xRaw: number,
+  maxRadius = 48,
+): { x: number; y: number } | null {
+  const x0 = clamp(Math.floor(xRaw), 0, terrain.width - 1);
+  for (let r = 0; r <= maxRadius; r += 1) {
+    const left = x0 - r;
+    if (left >= 0) {
+      const y = terrain.heights[left];
+      if (y < terrain.height) {
+        return { x: left, y: clamp(y, 0, terrain.height - 1) };
+      }
+    }
+    if (r === 0) {
+      continue;
+    }
+    const right = x0 + r;
+    if (right < terrain.width) {
+      const y = terrain.heights[right];
+      if (y < terrain.height) {
+        return { x: right, y: clamp(y, 0, terrain.height - 1) };
+      }
+    }
+  }
+  return null;
+}
+
+function tankSupportCountAt(terrain: TerrainState, x: number, y: number): number {
+  const footY = Math.floor(y + 5);
+  let count = 0;
+  for (let sx = Math.max(0, x - 6); sx <= Math.min(terrain.width - 1, x + 6); sx += 1) {
+    if (isSolid(terrain, sx, footY) || isSolid(terrain, sx, footY + 1)) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+function tankBodyOverlapCountAt(terrain: TerrainState, x: number, y: number): number {
+  let count = 0;
+  const minXBody = Math.max(0, x - 6);
+  const maxXBody = Math.min(terrain.width - 1, x + 6);
+  const minYBody = Math.max(0, Math.floor(y - 4));
+  const maxYBody = Math.min(terrain.height - 1, Math.floor(y + 1));
+  for (let sx = minXBody; sx <= maxXBody; sx += 1) {
+    for (let sy = minYBody; sy <= maxYBody; sy += 1) {
+      if (isSolid(terrain, sx, sy)) {
+        count += 1;
+      }
+    }
+  }
+  return count;
+}
+
+function hasFirmTankFooting(terrain: TerrainState, x: number, y: number): boolean {
+  return tankSupportCountAt(terrain, x, y) >= 2;
+}
+
+function solveTankSeatedY(terrain: TerrainState, xRaw: number, preferredY?: number): number | null {
+  const x = clamp(Math.floor(xRaw), 0, terrain.width - 1);
+  const nearest = nearestSurfaceColumn(terrain, x, 64);
+  const surfaceTop = nearest ? nearest.y : terrain.heights[x];
+  const surfaceY = clamp(surfaceTop - 4, 2, terrain.height - 10);
+  const anchorY = preferredY ?? surfaceY;
+  const minY = Math.max(2, Math.floor(Math.min(surfaceY, anchorY) - 10));
+  const maxY = Math.min(terrain.height - 10, Math.ceil(Math.max(surfaceY, anchorY) + 10));
+  let best: number | null = null;
+  let bestDist = Number.POSITIVE_INFINITY;
+  for (let y = minY; y <= maxY; y += 1) {
+    if (tankBodyOverlapCountAt(terrain, x, y) > 2) {
+      continue;
+    }
+    if (!hasFirmTankFooting(terrain, x, y)) {
+      continue;
+    }
+    const dist = Math.abs(y - anchorY);
+    if (dist < bestDist) {
+      best = y;
+      bestDist = dist;
+      if (dist <= 0.01) {
+        break;
+      }
+    }
+  }
+  return best;
+}
+
+function resolveTankGroundY(terrain: TerrainState, xRaw: number, currentY?: number): number {
+  const x = clamp(Math.floor(xRaw), 0, terrain.width - 1);
+  const seated = solveTankSeatedY(terrain, x, currentY);
+  if (seated !== null) {
+    return seated;
+  }
+  const nearest = nearestSurfaceColumn(terrain, x, 64);
+  const surfaceTop = nearest ? nearest.y : terrain.heights[x];
+  return clamp(surfaceTop - 4, 2, terrain.height - 10);
 }
 
 const paletteScorchCache = new WeakMap<Array<[number, number, number]>, Uint8Array>();
@@ -759,6 +905,7 @@ export default function App(): JSX.Element {
       for (const projectile of predicted.projectiles) {
         let p = projectile;
         let collided = false;
+        let lostOutOfBounds = false;
         const subStepCount = 4;
         const projectileTimeScale = 2.2;
         const subDt = FIXED_DT / subStepCount;
@@ -766,6 +913,10 @@ export default function App(): JSX.Element {
         for (let s = 0; s < subStepCount; s += 1) {
           const before = p;
           p = stepProjectile(p, subDt * projectileTimeScale, currentMatch.settings.gravity, currentMatch.wind);
+          const segmentSolidHit = firstSolidOnSegment(currentTerrain, before.x, before.y, p.x, p.y);
+          if (segmentSolidHit) {
+            p = { ...p, x: segmentSolidHit.x, y: segmentSolidHit.y };
+          }
           predicted.trails.push({
             x1: before.x,
             y1: before.y,
@@ -775,14 +926,19 @@ export default function App(): JSX.Element {
             life: p.weaponId === 'smoke-tracer' ? 2.6 : p.weaponId === 'tracer' ? 1.8 : 0.85,
             color: p.color,
           });
-          const outOfBounds = p.x < 0 || p.x >= currentTerrain.width || p.y >= currentTerrain.height || p.ttl <= 0;
-          if (outOfBounds || (p.y >= 0 && isSolid(currentTerrain, p.x, p.y))) {
+          if (p.y >= currentTerrain.height) {
+            lostOutOfBounds = true;
+            collided = true;
+            break;
+          }
+          const outOfBounds = p.x < 0 || p.x >= currentTerrain.width || p.ttl <= 0;
+          if (outOfBounds || (p.y >= 0 && isProjectileCollisionSolid(currentTerrain, p.x, p.y))) {
             collided = true;
             break;
           }
         }
 
-        if (collided || p.ttl <= 0) {
+        if (lostOutOfBounds || collided || p.ttl <= 0) {
           continue;
         }
         survivors.push(p);
@@ -896,65 +1052,17 @@ export default function App(): JSX.Element {
       const rightH = terrainState.heights[Math.min(terrainState.width - 1, x + 5)];
       return Math.abs(leftH - rightH) <= 3;
     };
-    const supportCountAt = (terrainState: TerrainState, x: number, y: number): number => {
-      const footY = Math.floor(y + 5);
-      let count = 0;
-      for (let sx = Math.max(0, x - 6); sx <= Math.min(terrainState.width - 1, x + 6); sx += 1) {
-        if (isSolid(terrainState, sx, footY) || isSolid(terrainState, sx, footY + 1)) {
-          count += 1;
-        }
-      }
-      return count;
-    };
-    const bodyOverlapCountAt = (terrainState: TerrainState, x: number, y: number): number => {
-      let count = 0;
-      const minXBody = Math.max(0, x - 6);
-      const maxXBody = Math.min(terrainState.width - 1, x + 6);
-      const minYBody = Math.max(0, Math.floor(y - 4));
-      const maxYBody = Math.min(terrainState.height - 1, Math.floor(y + 1));
-      for (let sx = minXBody; sx <= maxXBody; sx += 1) {
-        for (let sy = minYBody; sy <= maxYBody; sy += 1) {
-          if (isSolid(terrainState, sx, sy)) {
-            count += 1;
-          }
-        }
-      }
-      return count;
-    };
-    const hasFirmTankFooting = (terrainState: TerrainState, x: number, y: number): boolean => {
-      const footY = Math.floor(y + 5);
-      const wheelLeft = x - 4;
-      const wheelRight = x + 4;
-      const leftWheelSupported = isSolid(terrainState, wheelLeft, footY) || isSolid(terrainState, wheelLeft, footY + 1);
-      const rightWheelSupported = isSolid(terrainState, wheelRight, footY) || isSolid(terrainState, wheelRight, footY + 1);
-      return leftWheelSupported && rightWheelSupported && supportCountAt(terrainState, x, y) >= 6;
-    };
-    const solveSeatedY = (terrainState: TerrainState, x: number): number | null => {
-      const surfaceY = terrainState.heights[x] - 4;
-      const minY = Math.max(2, surfaceY - 8);
-      const maxY = Math.min(terrainState.height - 10, surfaceY + 6);
-      for (let y = minY; y <= maxY; y += 1) {
-        if (bodyOverlapCountAt(terrainState, x, y) > 6) {
-          continue;
-        }
-        if (!hasFirmTankFooting(terrainState, x, y)) {
-          continue;
-        }
-        return y;
-      }
-      return null;
-    };
-
     const picks: number[] = [];
     for (let i = 0; i < players.length; i += 1) {
-      let best = clamp(Math.floor(minX + Math.random() * (maxX - minX + 1)), minX, maxX);
+      let best: number | null = null;
+      const relaxedSep = Math.max(10, Math.floor(minSep * 0.6));
       let found = false;
       for (let attempt = 0; attempt < 180; attempt += 1) {
         const candidate = clamp(Math.floor(minX + Math.random() * (maxX - minX + 1)), minX, maxX);
         if (!isStableSpawnX(candidate, terrainOut)) {
           continue;
         }
-        if (solveSeatedY(terrainOut, candidate) === null) {
+        if (solveTankSeatedY(terrainOut, candidate) === null) {
           continue;
         }
         if (picks.every((x) => Math.abs(x - candidate) >= minSep)) {
@@ -962,16 +1070,38 @@ export default function App(): JSX.Element {
           found = true;
           break;
         }
-        if (picks.every((x) => Math.abs(x - candidate) >= Math.max(10, Math.floor(minSep * 0.6)))) {
+        if (best === null && picks.every((x) => Math.abs(x - candidate) >= relaxedSep)) {
           best = candidate;
         }
       }
-      picks.push(found ? best : best);
+      if (!found && best === null) {
+        for (let candidate = minX; candidate <= maxX; candidate += 1) {
+          if (solveTankSeatedY(terrainOut, candidate) === null) {
+            continue;
+          }
+          if (picks.every((x) => Math.abs(x - candidate) >= relaxedSep)) {
+            best = candidate;
+            break;
+          }
+        }
+      }
+      if (best === null) {
+        for (let candidate = minX; candidate <= maxX; candidate += 1) {
+          if (solveTankSeatedY(terrainOut, candidate) !== null) {
+            best = candidate;
+            break;
+          }
+        }
+      }
+      if (best === null) {
+        best = clamp(Math.floor(minX + Math.random() * (maxX - minX + 1)), minX, maxX);
+      }
+      picks.push(best);
     }
 
     const nextPlayers = players.map((player, i) => {
       const x = picks[i];
-      const y = solveSeatedY(terrainOut, x) ?? (terrainOut.heights[x] - 4);
+      const y = resolveTankGroundY(terrainOut, x);
       return {
         ...player,
         x,
@@ -1057,14 +1187,12 @@ export default function App(): JSX.Element {
       const batteryHeal = weapon.id === 'battery' ? 32 : 0;
       const shieldItem = SHIELD_ITEMS.find((s) => s.id === weapon.id);
       const fuelBoost = weapon.id === 'fuel' ? 100 : 0;
-      const parachuteBoost = weapon.id === 'parachute' ? 1 : 0;
       const updated = {
         ...armedShooter,
         hp: clamp(armedShooter.hp + batteryHeal, 0, 100),
         shield: shieldItem ? shieldItem.initialStrength : armedShooter.shield,
         shieldType: shieldItem ? shieldItem.shieldType : armedShooter.shieldType,
         fuel: clamp(armedShooter.fuel + fuelBoost, 0, 1000),
-        parachutes: clamp(armedShooter.parachutes + parachuteBoost, 0, 9),
       };
       const nextMatch = nextActivePlayer(updatePlayer(sourceMatch, updated));
       matchRef.current = nextMatch;
@@ -1136,8 +1264,12 @@ export default function App(): JSX.Element {
         if (nextX === updatedX) {
           break;
         }
+        const seatedY = solveTankSeatedY(currentTerrain, nextX, updatedY);
+        if (seatedY === null) {
+          break;
+        }
         updatedX = nextX;
-        updatedY = currentTerrain.heights[nextX] - 4;
+        updatedY = seatedY;
         updatedFuel = Math.max(0, updatedFuel - 1);
         movementTickAccumulatorRef.current -= 1;
       }
@@ -1231,11 +1363,13 @@ export default function App(): JSX.Element {
         if (!player.alive) {
           return player;
         }
-        const x = clamp(Math.floor(player.x), 0, terrainState.width - 1);
-        const groundY = terrainState.heights[x] - 4;
-        // Only snap tanks downward (gravity/fall). Do not push them upward when dirt is added,
-        // so ton/liquid dirt can bury a tank instead of lifting it.
-        if (player.y >= groundY - 0.5) {
+        const groundY = resolveTankGroundY(terrainState, player.x, player.y);
+        const embedded = tankBodyOverlapCountAt(terrainState, clamp(Math.floor(player.x), 0, terrainState.width - 1), player.y) > 2;
+        if (player.y >= groundY - 0.5 && (!embedded || player.y <= groundY + 0.5)) {
+          return player;
+        }
+        // Only snap for small adjustments; let the falling physics handle large drops
+        if (groundY > player.y + 12) {
           return player;
         }
         return {
@@ -1766,6 +1900,7 @@ export default function App(): JSX.Element {
 
       let p = projectile;
       let collided = false;
+      let lostOutOfBounds = false;
       const subStepCount = 4;
       const projectileTimeScale = 2.2;
       const subDt = FIXED_DT / subStepCount;
@@ -1774,6 +1909,12 @@ export default function App(): JSX.Element {
       for (let s = 0; s < subStepCount; s += 1) {
         const before = p;
         p = stepProjectile(p, subDt * projectileTimeScale, currentMatch.settings.gravity, currentMatch.wind);
+        const segmentSolidHit = firstSolidOnSegment(nextTerrain, before.x, before.y, p.x, p.y);
+        let tracedTerrainHit = false;
+        if (segmentSolidHit) {
+          p = { ...p, x: segmentSolidHit.x, y: segmentSolidHit.y };
+          tracedTerrainHit = true;
+        }
         runtime.trails.push({
           x1: before.x,
           y1: before.y,
@@ -1857,10 +1998,14 @@ export default function App(): JSX.Element {
         if (shieldAbsorbed || shieldBounced) break;
 
         const skyOverflowLimit = currentTerrain.height * 0.5;
+        if (p.y >= currentTerrain.height) {
+          lostOutOfBounds = true;
+          collided = true;
+          break;
+        }
         const outOfBounds = p.x < 0
           || p.x >= currentTerrain.width
-          || p.y < -skyOverflowLimit
-          || p.y >= currentTerrain.height;
+          || p.y < -skyOverflowLimit;
         let forcedBoundaryImpact = false;
         if (outOfBounds) {
           p = {
@@ -1871,7 +2016,7 @@ export default function App(): JSX.Element {
           forcedBoundaryImpact = true;
         }
 
-        const hitTerrain = forcedBoundaryImpact || isSolid(nextTerrain, p.x, p.y);
+        const hitTerrain = tracedTerrainHit || forcedBoundaryImpact || isProjectileCollisionSolid(nextTerrain, p.x, p.y);
         const hitPlayer = nextMatch.players.find(
           (player) =>
             player.alive &&
@@ -1884,8 +2029,9 @@ export default function App(): JSX.Element {
         }
 
         const weapon = getWeaponById(p.weaponId);
-        const impactX = clamp(p.x, 0, currentTerrain.width - 1);
-        const impactY = clamp(p.y, 0, currentTerrain.height - 1);
+        const impactPoint = resolveTerrainImpactPoint(nextTerrain, p.x, p.y);
+        const impactX = impactPoint.x;
+        const impactY = impactPoint.y;
 
         const weaponSpec = getWeaponRuntimeSpec(weapon.id);
 
@@ -2250,13 +2396,17 @@ export default function App(): JSX.Element {
         break;
       }
 
+      if (lostOutOfBounds) {
+        continue;
+      }
       if (!collided && p.ttl > 0) {
         survivors.push(p);
       } else if (collided && projectile.projectileType === 'funky-child' && runtime.funkySequence) {
         runtime.funkySequence.resolvedSides += 1;
       } else if (!collided && p.ttl <= 0 && projectile.projectileType === 'funky-child' && runtime.funkySequence) {
-        const impactX = clamp(p.x, 0, currentTerrain.width - 1);
-        const impactY = clamp(p.y, 0, currentTerrain.height - 1);
+        const impactPoint = resolveTerrainImpactPoint(nextTerrain, p.x, p.y);
+        const impactX = impactPoint.x;
+        const impactY = impactPoint.y;
         const blastRadius = 30;
         const blastDamage = 260;
         enqueueTerrainEdit('crater', impactX, impactY, blastRadius, 0.35);
@@ -2275,8 +2425,9 @@ export default function App(): JSX.Element {
       } else if (collided && projectile.projectileType === 'mirv-child' && runtime.mirvSequence) {
         runtime.mirvSequence.resolved += 1;
       } else if (!collided && p.ttl <= 0 && projectile.projectileType === 'mirv-child' && runtime.mirvSequence) {
-        const impactX = clamp(p.x, 0, currentTerrain.width - 1);
-        const impactY = clamp(p.y, 0, currentTerrain.height - 1);
+        const impactPoint = resolveTerrainImpactPoint(nextTerrain, p.x, p.y);
+        const impactX = impactPoint.x;
+        const impactY = impactPoint.y;
         const weapon = getWeaponById(p.weaponId);
         const blastRadius = effectiveBlastRadius(weapon.id, weapon.blastRadius);
         enqueueTerrainEdit('crater', impactX, impactY, blastRadius, 0.35, undefined, undefined, true);
@@ -2399,14 +2550,14 @@ export default function App(): JSX.Element {
         if (!player.alive) {
           return player;
         }
-        const x = clamp(Math.floor(player.x), 0, nextTerrain.width - 1);
-        const groundY = nextTerrain.heights[x] - 4;
+        const groundY = resolveTankGroundY(nextTerrain, player.x, player.y);
         const fallDist = groundY - player.y;
+        const chuteCount = player.inventory['parachute'] ?? 0;
         if (fallDist <= 0) {
           if (player.fallDistance === 0) {
             return player;
           }
-          const hadChute = player.parachutes > 0;
+          const hadChute = chuteCount > 0;
           const shouldConsumeChute = hadChute && player.fallDistance > 16;
           const effectiveFall = hadChute ? player.fallDistance * 0.25 : player.fallDistance;
           const landingDamage = Math.max(0, effectiveFall - 8) * 0.32;
@@ -2421,12 +2572,14 @@ export default function App(): JSX.Element {
             maxPower: maxPowerForHp(hpAfterLanding),
             power: clamp(player.power, 0, maxPowerForHp(hpAfterLanding)),
             alive: hpAfterLanding > 0,
-            parachutes: shouldConsumeChute ? Math.max(0, player.parachutes - 1) : player.parachutes,
+            inventory: shouldConsumeChute
+              ? { ...player.inventory, parachute: Math.max(0, chuteCount - 1) }
+              : player.inventory,
             fallDistance: 0,
           };
         }
 
-        const usingParachute = player.parachutes > 0 && player.fallDistance + fallDist > 18;
+        const usingParachute = chuteCount > 0 && player.fallDistance + fallDist > 18;
         const verticalSpeed = usingParachute ? 62 : 260;
         const step = Math.min(fallDist, verticalSpeed * FIXED_DT);
         const nextY = player.y + step;
@@ -2446,7 +2599,9 @@ export default function App(): JSX.Element {
             maxPower: maxPowerForHp(hpAfterLanding),
             power: clamp(player.power, 0, maxPowerForHp(hpAfterLanding)),
             alive: hpAfterLanding > 0,
-            parachutes: shouldConsumeChute ? Math.max(0, player.parachutes - 1) : player.parachutes,
+            inventory: shouldConsumeChute
+              ? { ...player.inventory, parachute: Math.max(0, chuteCount - 1) }
+              : player.inventory,
             fallDistance: 0,
           };
         }
@@ -2509,8 +2664,7 @@ export default function App(): JSX.Element {
       if (!player.alive) {
         return false;
       }
-      const x = clamp(Math.floor(player.x), 0, nextTerrain.width - 1);
-      const groundY = nextTerrain.heights[x] - 4;
+      const groundY = resolveTankGroundY(nextTerrain, player.x, player.y);
       return groundY - player.y > 0.75;
     });
 
@@ -2518,6 +2672,7 @@ export default function App(): JSX.Element {
       nextMatch = nextActivePlayer({ ...nextMatch, phase: 'resolve' });
     }
 
+    nextTerrain = ensureFloorIntegrity(nextTerrain);
     matchRef.current = nextMatch;
     terrainRef.current = nextTerrain;
   }, [makeTerrainForRound, networkMode, placePlayersOnTerrain, pushHostSnapshot, resetRuntime, viewportSize.height, viewportSize.width]);
@@ -2728,6 +2883,49 @@ export default function App(): JSX.Element {
       pushHostSnapshot(true, 'battle');
     }
   }, [makeTerrainForRound, networkMode, placePlayersOnTerrain, pushHostSnapshot, resetRuntime, setShopDoneState, viewportSize.height, viewportSize.width]);
+
+  const recreateBattleTerrain = useCallback(async () => {
+    const liveMatch = matchRef.current;
+    if (!liveMatch || screen !== 'battle') {
+      return;
+    }
+
+    const generated = await makeTerrainForRound(
+      liveMatch.width,
+      liveMatch.height,
+      liveMatch.settings.terrainPreset,
+      liveMatch.players.length,
+    );
+    const placed = placePlayersOnTerrain(liveMatch, generated.terrain);
+    const alivePlayers = placed.match.players.filter((p) => p.alive);
+    const fallbackActive = placed.match.players[0]?.config.id ?? placed.match.activePlayerId;
+    const nextActivePlayerId = alivePlayers.find((p) => p.config.id === placed.match.activePlayerId)?.config.id
+      ?? alivePlayers[0]?.config.id
+      ?? fallbackActive;
+    const nextMatch: MatchState = {
+      ...placed.match,
+      phase: 'aim',
+      activePlayerId: nextActivePlayerId,
+    };
+
+    resetRuntime();
+    simulationAccumulatorRef.current = 0;
+    uiSyncAccumulatorRef.current = 0;
+    powerTickAccumulatorRef.current = 0;
+    angleTickAccumulatorRef.current = 0;
+    movementTickAccumulatorRef.current = 0;
+
+    terrainRef.current = placed.terrain;
+    matchRef.current = nextMatch;
+    setTerrain(placed.terrain);
+    setMatch(nextMatch);
+    setMessage(`Terrain recreated: ${generated.source}`);
+
+    if (networkMode === 'host') {
+      battleTerrainWarmupRemainingRef.current = BATTLE_TERRAIN_WARMUP_SNAPSHOTS;
+      pushHostSnapshot(true, 'battle');
+    }
+  }, [makeTerrainForRound, networkMode, placePlayersOnTerrain, pushHostSnapshot, resetRuntime, screen]);
 
   const useShieldFromPopup = useCallback((shieldId: string) => {
     const liveMatch = matchRef.current;
@@ -3176,6 +3374,10 @@ export default function App(): JSX.Element {
           match={match}
           terrain={terrain}
           message={message}
+          recreateDisabled={networkMode === 'client'}
+          onRecreateTerrain={() => {
+            void recreateBattleTerrain();
+          }}
           shieldMenuOpen={shieldMenuOpen}
           shieldMenuPlayerName={activeBattlePlayer?.config.name ?? ''}
           shieldMenuItems={shieldMenuItems}

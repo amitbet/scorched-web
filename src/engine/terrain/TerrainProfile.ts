@@ -1,4 +1,5 @@
 import type { TerrainState } from '../../types/game';
+import { getFloorTop, stampFloor } from './TerrainDeform';
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
@@ -131,11 +132,21 @@ export function terrainFromHeights(width: number, height: number, heights: numbe
     }
   }
 
+  // Ensure the indestructible floor is always present.
+  stampFloor(mask, width, height);
+
+  // Clamp heights so no column reports a surface inside the floor.
+  const floorTop = getFloorTop(height);
+  const clampedHeights = heights.map((v) => {
+    const h = clamp(Math.round(v), 0, height - 1);
+    return Math.min(h, floorTop);
+  });
+
   return {
     width,
     height,
     revision: 0,
-    heights: heights.map((v) => clamp(Math.round(v), 0, height - 1)),
+    heights: clampedHeights,
     mask,
   };
 }

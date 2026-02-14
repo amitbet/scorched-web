@@ -285,8 +285,8 @@ label {
 
 .battle-host canvas {
   width: 100%;
-  height: auto;
-  max-width: none;
+  height: 100%;
+  max-width: 100%;
   display: block;
 }
 
@@ -295,11 +295,18 @@ label {
   min-height: 24px;
   display: flex;
   align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   padding: 3px 8px;
   color: #c6c9df;
   font-size: 12px;
   background: rgba(8, 8, 12, 0.86);
   border-top: 1px solid #7b7f99;
+}
+
+.battle-footer-text {
+  flex: 1;
+  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;

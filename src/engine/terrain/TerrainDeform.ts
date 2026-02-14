@@ -1,10 +1,34 @@
 import type { TerrainState } from '../../types/game';
 
+/** Indestructible solid floor at the very bottom of the battlefield (pixels). */
+export const FLOOR_THICKNESS = 1;
+
 function clamp(v: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, v));
 }
 
+function effectiveFloorThickness(height: number): number {
+  void height;
+  return FLOOR_THICKNESS;
+}
+
+export function getFloorTop(height: number): number {
+  return height - effectiveFloorThickness(height);
+}
+
+/** Stamp an indestructible floor into the bottom rows of the mask. */
+export function stampFloor(mask: Uint8Array, width: number, height: number): void {
+  const floorTop = getFloorTop(height);
+  for (let y = floorTop; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      mask[y * width + x] = 1;
+    }
+  }
+}
+
 function rebuildHeights(mask: Uint8Array, width: number, height: number): number[] {
+  // Always enforce the indestructible floor before scanning.
+  stampFloor(mask, width, height);
   const heights = new Array<number>(width);
   for (let x = 0; x < width; x += 1) {
     let y = 0;
@@ -14,6 +38,30 @@ function rebuildHeights(mask: Uint8Array, width: number, height: number): number
     heights[x] = y;
   }
   return heights;
+}
+
+export function ensureFloorIntegrity(terrain: TerrainState): TerrainState {
+  const mask = new Uint8Array(terrain.mask);
+  const floorTop = getFloorTop(terrain.height);
+  let changed = false;
+  for (let y = floorTop; y < terrain.height; y += 1) {
+    for (let x = 0; x < terrain.width; x += 1) {
+      const idx = y * terrain.width + x;
+      if (mask[idx] !== 1) {
+        mask[idx] = 1;
+        changed = true;
+      }
+    }
+  }
+  if (!changed) {
+    return terrain;
+  }
+  return {
+    ...terrain,
+    revision: terrain.revision + 1,
+    mask: mask as Uint8Array,
+    heights: rebuildHeights(mask, terrain.width, terrain.height),
+  };
 }
 
 function settleMask(mask: Uint8Array, width: number, height: number): void {
@@ -29,6 +77,7 @@ function settleMask(mask: Uint8Array, width: number, height: number): void {
     }
   }
   mask.set(settled);
+  stampFloor(mask, width, height);
 }
 
 export function settleTerrain(terrain: TerrainState): TerrainState {
@@ -62,6 +111,8 @@ export function carveCrater(terrain: TerrainState, cx: number, cy: number, radiu
 
   if (settle) {
     settleMask(next, terrain.width, terrain.height);
+  } else {
+    stampFloor(next, terrain.width, terrain.height);
   }
 
   return {
